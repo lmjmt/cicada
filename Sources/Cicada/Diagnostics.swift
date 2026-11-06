@@ -245,7 +245,7 @@ final class Diagnostics: ObservableObject {
     /// here, the page shortens them.
     func report(version: String, service: AIConfig) -> String {
         func f(_ s: Stat?) -> String { s.map { String(format: "p50 %.2fs p95 %.2fs n=%d", $0.p50, $0.p95, $0.n) } ?? "-" }
-        var lines = [L("\(appDisplayName) \(version) 诊断  \(Date())"),
+        var lines = [L("\(appDisplayName) \(version) 诊断  \(Date().description)"),
                      "AI: \(service.provider.id.rawValue) · \(service.textModel)" + (service.voiceModel.map { " · " + $0 } ?? "")]
         if let startedAt { lines.append(String(format: L("本场 %.0f 分钟"), (endedAt ?? Date()).timeIntervalSince(startedAt) / 60)) }
         lines.append(L("说完到出字幕 ") + f(endToEnd))

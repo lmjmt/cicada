@@ -74,7 +74,43 @@ struct NotesContentView: View {
 
             if !notes.conclusions.isEmpty || !notes.todos.isEmpty {
                 VStack(alignment: .leading, spacing: 10) {
-                    title(notes.todos.isEmpty ? L("结论") : L("结论和待办"))
+                    HStack {
+                        title(notes.todos.isEmpty ? L("结论") : L("结论和待办"))
+                        Spacer()
+                        if !notes.todos.isEmpty {
+                            Button(action: {
+                                let title = (notes.title?.isEmpty ?? true) ? L("会议纪要") : notes.title!
+                                LarkSync.pushAllToLark(title: title,
+                                                       todos: notes.todos,
+                                                       conclusions: notes.conclusions) { ok, output in
+                                    let alert = NSAlert()
+                                    if ok {
+                                        alert.messageText = L("🎉 飞书待办清单创建成功！")
+                                        alert.informativeText = L("已将当前会议的所有待办事项打包推送至飞书专属任务清单。\n是否立即在飞书中查看？")
+                                        alert.addButton(withTitle: L("在飞书中打开"))
+                                        alert.addButton(withTitle: L("完成"))
+                                        let url = LarkSync.extractLarkURL(from: output ?? "")
+                                        if alert.runModal() == .alertFirstButtonReturn, let url {
+                                            NSWorkspace.shared.open(url)
+                                        }
+                                    } else {
+                                        alert.messageText = L("飞书待办推送遇到问题")
+                                        alert.informativeText = output ?? L("未知错误")
+                                        alert.addButton(withTitle: L("好"))
+                                        alert.runModal()
+                                    }
+                                }
+                            }) {
+                                HStack(spacing: 4) {
+                                    Image(systemName: "paperplane.fill")
+                                    Text(L("一键推送到飞书"))
+                                }
+                                .font(.system(size: 11, weight: .medium))
+                                .foregroundStyle(Palette.link)
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
                     if document {
                         VStack(alignment: .leading, spacing: 0) { items }
                     } else {
@@ -129,6 +165,37 @@ struct NotesContentView: View {
                 } else {
                     Tag(L("依据 \(item.support) 句"))
                 }
+                if todo {
+                    Button {
+                        let title = (notes.title?.isEmpty ?? true) ? L("会议纪要") : notes.title!
+                        LarkSync.pushSingleTodo(title: title,
+                                               todo: item,
+                                               conclusions: notes.conclusions) { ok, output in
+                            let alert = NSAlert()
+                            if ok {
+                                alert.messageText = L("✅ 待办已推送到飞书！")
+                                alert.informativeText = L("已创建个人飞书待办任务：\(item.text)\n是否立即在飞书中打开该任务？")
+                                alert.addButton(withTitle: L("在飞书中打开"))
+                                alert.addButton(withTitle: L("完成"))
+                                let url = LarkSync.extractLarkURL(from: output ?? "")
+                                if alert.runModal() == .alertFirstButtonReturn, let url {
+                                    NSWorkspace.shared.open(url)
+                                }
+                            } else {
+                                alert.messageText = L("单条推送遇到问题")
+                                alert.informativeText = output ?? L("未知错误")
+                                alert.addButton(withTitle: L("好"))
+                                alert.runModal()
+                            }
+                        }
+                    } label: {
+                        Image(systemName: "arrow.up.forward.app")
+                            .font(.system(size: 11))
+                            .foregroundStyle(Palette.link)
+                    }
+                    .buttonStyle(.plain)
+                    .help(L("单独推送到飞书待办"))
+                }
             }
             .padding(.horizontal, document ? 0 : 16).padding(.vertical, 11)
             if !document && i < all.count - 1 { Divider() }
@@ -151,9 +218,45 @@ private struct DocumentNotesView: View {
             let items = notes.conclusions + notes.todos
             if !items.isEmpty {
                 VStack(alignment: .leading, spacing: 8) {
-                    Text(notes.todos.isEmpty ? L("结论") : L("结论和待办"))
-                        .font(.system(size: 12, weight: .medium)).foregroundStyle(Palette.secondary)
-                        .padding(.bottom, 2)
+                    HStack {
+                        Text(notes.todos.isEmpty ? L("结论") : L("结论和待办"))
+                            .font(.system(size: 12, weight: .medium)).foregroundStyle(Palette.secondary)
+                            .padding(.bottom, 2)
+                        Spacer()
+                        if !notes.todos.isEmpty {
+                            Button(action: {
+                                let title = (notes.title?.isEmpty ?? true) ? L("会议纪要") : notes.title!
+                                LarkSync.pushAllToLark(title: title,
+                                                       todos: notes.todos,
+                                                       conclusions: notes.conclusions) { ok, output in
+                                    let alert = NSAlert()
+                                    if ok {
+                                        alert.messageText = L("🎉 飞书待办清单创建成功！")
+                                        alert.informativeText = L("已将当前会议的所有待办事项打包推送至飞书专属任务清单。\n是否立即在飞书中查看？")
+                                        alert.addButton(withTitle: L("在飞书中打开"))
+                                        alert.addButton(withTitle: L("完成"))
+                                        let url = LarkSync.extractLarkURL(from: output ?? "")
+                                        if alert.runModal() == .alertFirstButtonReturn, let url {
+                                            NSWorkspace.shared.open(url)
+                                        }
+                                    } else {
+                                        alert.messageText = L("飞书待办推送遇到问题")
+                                        alert.informativeText = output ?? L("未知错误")
+                                        alert.addButton(withTitle: L("好"))
+                                        alert.runModal()
+                                    }
+                                }
+                            }) {
+                                HStack(spacing: 4) {
+                                    Image(systemName: "paperplane.fill")
+                                    Text(L("一键推送全部待办到飞书"))
+                                }
+                                .font(.system(size: 11, weight: .medium))
+                                .foregroundStyle(Palette.link)
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
                     ForEach(Array(items.enumerated()), id: \.offset) { i, item in
                         conclusion(item, index: i + 1, todo: i >= notes.conclusions.count)
                     }
@@ -209,6 +312,37 @@ private struct DocumentNotesView: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
             if weak { Tag(L("依据较少")) }
             if let t = item.t, !weak { TimeLink(text: NotesEngine.clock(t), t: t, onJump: onJump) }
+            if todo {
+                Button {
+                    let title = (notes.title?.isEmpty ?? true) ? L("会议纪要") : notes.title!
+                    LarkSync.pushSingleTodo(title: title,
+                                           todo: item,
+                                           conclusions: notes.conclusions) { ok, output in
+                        let alert = NSAlert()
+                        if ok {
+                            alert.messageText = L("✅ 待办已推送到飞书！")
+                            alert.informativeText = L("已创建个人飞书待办任务：\(item.text)\n是否立即在飞书中打开该任务？")
+                            alert.addButton(withTitle: L("在飞书中打开"))
+                            alert.addButton(withTitle: L("完成"))
+                            let url = LarkSync.extractLarkURL(from: output ?? "")
+                            if alert.runModal() == .alertFirstButtonReturn, let url {
+                                NSWorkspace.shared.open(url)
+                            }
+                        } else {
+                            alert.messageText = L("单条推送遇到问题")
+                            alert.informativeText = output ?? L("未知错误")
+                            alert.addButton(withTitle: L("好"))
+                            alert.runModal()
+                        }
+                    }
+                } label: {
+                    Image(systemName: "arrow.up.forward.app")
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(Palette.link)
+                }
+                .buttonStyle(.plain)
+                .help(L("单独推送到飞书待办"))
+            }
         }
         .padding(.vertical, 3)
     }

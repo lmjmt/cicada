@@ -62,7 +62,9 @@ enum AudioFileWriter {
         guard let export = AVAssetExportSession(asset: asset, presetName: AVAssetExportPresetPassthrough) else { return }
         if let until { export.timeRange = CMTimeRange(start: .zero, duration: CMTime(seconds: until, preferredTimescale: 600)) }
         do {
-            try await export.export(to: url, as: .m4a)
+            export.outputURL = url
+            export.outputFileType = .m4a
+            await export.export()
             try? FileManager.default.removeItem(at: src)
         } catch {
             debugLog("audio rewrap failed \(url.lastPathComponent): \(error)")

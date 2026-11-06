@@ -1089,7 +1089,7 @@ final class AppModel: ObservableObject {
     private func watchNetwork() {
         networkMonitor.pathUpdateHandler = { [weak self] path in
             guard path.status == .satisfied else { return }
-            DispatchQueue.main.async {
+            DispatchQueue.main.async { [weak self] in
                 MainActor.assumeIsolated {
                     guard let self else { return }
                     self.networkDebounce?.cancel()

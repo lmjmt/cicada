@@ -466,7 +466,7 @@ final class NotesEngine: ObservableObject {
 
     // MARK: Prompt
 
-    static func clock(_ t: Double) -> String { TranscriptExport.clock(t) }
+    nonisolated static func clock(_ t: Double) -> String { TranscriptExport.clock(t) }
 
     /// `part`: in a long meeting's final pass, which part `from..<lines.count` is (1-based, of `of`).
     static func prompt(notes: MeetingNotes, lines: [TranscriptLine], from: Int, language: String, final: Bool,

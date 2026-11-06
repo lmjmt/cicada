@@ -260,7 +260,7 @@ struct AICheck: Equatable {
 
     /// Debug and logs: "reach=ok key=fail(invalidKey) text=skipped".
     var summary: String {
-        steps.map { s -> String in
+        let stepParts = steps.map { s -> String in
             let v: String = switch s.state {
             case .running: "running"
             case .ok(let sec): sec.map { "ok(\(String(format: "%.1f", $0))s)" } ?? "ok"
@@ -270,9 +270,14 @@ struct AICheck: Equatable {
             case .untested: "untested"
             }
             return "\(s.id.rawValue)=\(v)"
-        }.joined(separator: " ") + (proxy.map { " proxy=\($0)" } ?? "") + (localNetworkDenied ? " localNetwork=denied" : "") + (balance.map { " balance=\(String(format: "%.2f", $0))" } ?? "")
-            + (passive ? " passive" : "")
-            + (translate.map { " translate=\(String(format: "%.1f", $0.seconds))s\($0.thinks ? " thinks" : "")" } ?? "")
-            + (hear.map { " hear=\($0)" } ?? "")
+        }.joined(separator: " ")
+        var res = stepParts
+        if let p = proxy { res += " proxy=\(p)" }
+        if localNetworkDenied { res += " localNetwork=denied" }
+        if let b = balance { res += " balance=\(String(format: "%.2f", b))" }
+        if passive { res += " passive" }
+        if let t = translate { res += " translate=\(String(format: "%.1f", t.seconds))s\(t.thinks ? " thinks" : "")" }
+        if let h = hear { res += " hear=\(h)" }
+        return res
     }
 }

@@ -203,7 +203,7 @@ final class ListenEngine {
         // A download that failed for want of a network resumes when there is one again.
         pathMonitor.pathUpdateHandler = { [weak self] path in
             let up = path.status == .satisfied
-            DispatchQueue.main.async {
+            DispatchQueue.main.async { [weak self] in
                 MainActor.assumeIsolated {
                     guard let self, self.realOnline != up else { return }
                     self.realOnline = up

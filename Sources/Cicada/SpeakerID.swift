@@ -164,7 +164,9 @@ struct VoiceClusterer {
     /// The user said two voices are one: later lines like either go to `into`.
     mutating func merge(_ from: Int, into: Int) {
         guard sums.indices.contains(from), sums.indices.contains(into), from != into else { return }
-        vDSP_vadd(sums[into], 1, sums[from], 1, &sums[into], 1, vDSP_Length(sums[into].count))
+        var target = sums[into]
+        vDSP_vadd(target, 1, sums[from], 1, &target, 1, vDSP_Length(target.count))
+        sums[into] = target
         sums[from] = [Float](repeating: 0, count: sums[from].count)   // never the closest again
     }
 
@@ -178,7 +180,9 @@ struct VoiceClusterer {
             if sim > bestSim { bestSim = sim; best = i }
         }
         if best >= 0, bestSim >= Self.join {
-            vDSP_vadd(sums[best], 1, v, 1, &sums[best], 1, vDSP_Length(v.count))
+            var target = sums[best]
+            vDSP_vadd(target, 1, v, 1, &target, 1, vDSP_Length(v.count))
+            sums[best] = target
             return best
         }
         if seconds >= Self.newSeconds, sums.isEmpty || bestSim < Self.startNew {
