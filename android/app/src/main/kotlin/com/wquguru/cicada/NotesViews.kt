@@ -31,7 +31,7 @@ object NotesViews {
         val line = listen.sessionId?.let { app.store.lines(it).lastOrNull() }
         return listOf(listen.listening, listen.sourceKind, listen.sessionId, listen.pending > 0, listen.problem, app.startProblem, silent(app), app.micSilenced,
                       line?.id, line?.src, line?.dst, app.notes.status, app.notes.notes.updatedAt, app.notes.notes.covered,
-                      app.ending?.deadline, app.ling.blocking, listen.problemKind, app.ling.provider.id).joinToString("|")
+                      app.ending?.deadline, app.ling.blocking, listen.problemKind, app.ling.provider.id, customOnlyUntranslated(app)).joinToString("|")
     }
 
     /// "正在听 · 03:12" / "面对面 · 03:12".
@@ -110,6 +110,9 @@ object NotesViews {
             blocking != null -> return statusLine(ui, Tone.NeedsYou, blocking, openSettings(ui, onMic))
             problem != null -> return statusLine(ui, when (kind) { "busy" -> Tone.Waiting; "key" -> Tone.NeedsYou; else -> Tone.Info },
                                                  problem, openSettings(ui, onMic).takeIf { kind == "key" })
+            // 语音和文字只发给你的服务: heard, but the user's service didn't translate and Google isn't
+            // asked. It picks up by itself; no 改用 Ling, which would send the meeting elsewhere.
+            customOnlyUntranslated(app) -> return statusLine(ui, Tone.Waiting, LF("译文等 %@ 恢复 · 字幕先显示原文", serviceLabel(app)))
             !silent(app) -> return null
         }
         val (iconRes, text) = if (micTaken) R.drawable.i_mic to L("麦克风正被通话或其他 app 占用，用完后接着听")
@@ -156,6 +159,10 @@ object NotesViews {
 
     /// #C98A00, the Mac's waiting dot: AiCheckViews.warn is too dark to tell from the text at 6 dp.
     private val WAITING = android.graphics.Color.parseColor("#C98A00")
+
+    /// Finished sentences going untranslated with 语音和文字只发给你的服务 in effect (the Mac's googleOff banner).
+    private fun customOnlyUntranslated(app: CicadaApp) =
+        app.listen.listening && app.translator.googleOff && app.translator.sentencesUntranslated
 
     /// Where this meeting's notes stop: the time of the last line they cover.
     /// Who the banner names: a custom service by its address, which says more than 这个服务.

@@ -45,7 +45,7 @@ scripts/shot.sh                     # 截图：悬浮窗应是黑块；capture o
 scripts/tap.sh "开始听"             # 按屏幕上的文字点（系统对话框也行），用来走真实界面
 ```
 
-`cicadactl.sh` 的命令见 `app/src/main/kotlin/com/wquguru/cicada/DebugReceiver.kt`（state、start、stop、feed、sample、view、capture、overlay show|hide|collapse|expand、target、ui、show main|live|records|record|settings|ai|onboarding、import、provider、ai-model、key import、voice-try、updatefeed、update check|download|job|notify）。只有开发版有，且只接受 adb。开发版默认不检查更新（点设置里的“检查更新”或用下面的命令后才查）：`cicadactl.sh push feed.json && cicadactl.sh updatefeed feed.json` 指向一份测试用的 release JSON（不带参数就是 GitHub），`adb shell cmd jobscheduler run -f com.wquguru.cicada.dev 7` 立刻跑一次后台检查。
+`cicadactl.sh` 的命令见 `app/src/main/kotlin/com/wquguru/cicada/DebugReceiver.kt`（state、start、stop、feed、sample、view、capture、overlay show|hide|collapse|expand、target、ui、show main|live|records|record|settings|ai|onboarding、import、provider、ai-model、ai-custom-only on|off、key import、voice-try、updatefeed、update check|download|job|notify）。只有开发版有，且只接受 adb。开发版默认不检查更新（点设置里的“检查更新”或用下面的命令后才查）：`cicadactl.sh push feed.json && cicadactl.sh updatefeed feed.json` 指向一份测试用的 release JSON（不带参数就是 GitHub），`adb shell cmd jobscheduler run -f com.wquguru.cicada.dev 7` 立刻跑一次后台检查。
 
 界面按 claude.ai 上的设计画布实现：首页、正在听、悬浮窗（纪要卡片 / 字幕条 / 小圆点）、三步引导、会议记录、会议详情、设置。文案用 Gemini（`google/gemini-4-argon`）审过一遍，与 Mac 共用的文案沿用 Mac 的译法。
 

@@ -275,3 +275,12 @@ def catalog(data: str | dict, recommended: list, hears: bool) -> list:
         ids.append(mid)
     rest = sorted(i for i in ids if i not in recommended)
     return list(recommended) + rest
+
+
+def only_host(c: AIConfig) -> str | None:
+    """Where a custom service's audio and text go, when every use shares one host (text, hear, and
+    the voice if set up); None when they differ (AISettings.swift › customHosts)."""
+    urls = [c.base, c.hear_url] + ([c.voice_base] if c.has_voices else [])
+    hosts = {urllib.parse.urlsplit(u).hostname for u in urls if u}
+    hosts.discard(None)
+    return hosts.pop() if len(hosts) == 1 else None

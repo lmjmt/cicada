@@ -154,11 +154,10 @@ sealed class TrayFlyout : Window
         var spoken = Languages.Targets.FirstOrDefault(t => t.Code == Languages.FromSystem(System.Globalization.CultureInfo.CurrentUICulture.Name))?.Code;
         var target = s.Target == "system" ? spoken ?? "zh-Hans" : s.Target;
         stack.Children.Add(Gap(ChoiceRow(L("翻译成"), Ui.TargetName(target), s.Target == "system" ? L("跟随系统") : null, Ui.TargetOptions(), s.Target, app.SetTarget), 12));
-        // 听哪里 (the Mac panel's row): changing it mid-meeting carries the same meeting on.
-        var sources = new[] { (ListenSource.System, L("电脑声音（线上会议、视频）")), (ListenSource.Room, L("会议室（用麦克风听桌边的人）")), (ListenSource.Both, L("电脑和会议室（线上和桌边的人都听）")) };
-        stack.Children.Add(Gap(ChoiceRow(L("听哪里"), SourceName(s.Listens), null, sources, s.Listens, app.SetListenSource), 8));
-        if (app.HybridNote is { } note) stack.Children.Add(Gap(Ui.Text(note, 12, Palette.Secondary), 6));
-        if (app.OnlinePrompt is { } meetingApp) stack.Children.Add(Gap(OnlineStrip(app, meetingApp, Hide), 10));
+        // 麦克风 (the Mac panel's row): turning it on mid-meeting adds the room to the same meeting.
+        var micText = Ui.Stack(2, Ui.Text(L("麦克风"), 14, Palette.Ink, Palette.Strong, wrap: false),
+                               Ui.Text(app.MicOn ? L("桌边的人说话也会记下") : L("关着 · 只听电脑声音"), 12, Palette.Secondary));
+        stack.Children.Add(Gap(Ui.Spread(micText, MicButton(app, panel: true)), 14));
         if (app.HybridMicDenied)
         {
             var text = Ui.Stack(2, Ui.Text(L("听会议室要先允许麦克风"), 13, Palette.AccentText, Palette.Strong), Ui.Text(L("电脑声音照常在记"), 11, Palette.Secondary));
@@ -204,23 +203,17 @@ sealed class TrayFlyout : Window
         return stack;
     }
 
-    /// 线上也有人？ / Zoom 正在通话 / 也听电脑 · 不用 (the Mac panel's strip), here and in the notes window.
-    public static FrameworkElement OnlineStrip(Controller app, string meetingApp, Action? after = null)
+    /// 打开麦克风 / 关闭麦克风, the same switch in the panel and the notes window (MicButton on the
+    /// Mac): in the panel the ink button while off, a quiet one while on; in the notes window a pale
+    /// one beside 结束, tinted while on.
+    public static Button MicButton(Controller app, bool panel)
     {
-        var stack = Ui.Stack(3, Ui.Text(L("线上也有人？"), 14, Palette.Ink, FontWeights.Bold), Ui.Text(LF("%@ 正在通话", meetingApp), 12, Palette.Secondary));
-        var buttons = Ui.Row(8, Ui.Button(L("也听电脑"), () => { after?.Invoke(); app.AnswerOnlinePrompt(true); }, Ui.Kind.Primary, height: 32),
-                             Ui.Button(L("不用"), () => { after?.Invoke(); app.AnswerOnlinePrompt(false); }, height: 32));
-        buttons.Margin = new Thickness(0, 10, 0, 0);
-        stack.Children.Add(buttons);
-        return new Border { Background = Palette.AccentPale, CornerRadius = new CornerRadius(12), Padding = new Thickness(14), Child = stack };
+        var on = app.MicOn;
+        var kind = on ? (panel ? Ui.Kind.Standard : Ui.Kind.Pale) : (panel ? Ui.Kind.Primary : Ui.Kind.Standard);
+        var b = Ui.Button(on ? L("关闭麦克风") : L("打开麦克风"), () => app.SetMic(!on), kind, Icons.Mic, 32);
+        b.MinWidth = 0; b.Padding = new Thickness(12, 0, 12, 0); b.VerticalAlignment = VerticalAlignment.Center;
+        return b;
     }
-
-    public static string SourceName(string source) => source switch
-    {
-        ListenSource.Room => L("会议室"),
-        ListenSource.Both => L("电脑和会议室"),
-        _ => L("电脑声音"),
-    };
 
     static FrameworkElement Gap(FrameworkElement e, double top) { e.Margin = new Thickness(e.Margin.Left, top, e.Margin.Right, e.Margin.Bottom); return e; }
 

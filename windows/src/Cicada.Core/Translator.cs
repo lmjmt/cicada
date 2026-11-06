@@ -16,6 +16,37 @@ public sealed class Translator(LingClient ling, HttpMessageHandler? google = nul
     // Tests hand in their own handler, so they never reach the real Google.
     readonly HttpClient Http = google is null ? Shared : MakeHttp(google);
     DateTime googleBackoffUntil = DateTime.MinValue;
+    bool googleOff, sentencesUntranslated;
+
+    /// Set by the app (语音和文字只发给你的服务, custom service only): Google is never asked, so the
+    /// text stays with the user's service. A stale Google backoff goes with it either way.
+    public bool GoogleOff
+    {
+        get => googleOff;
+        set
+        {
+            if (value == googleOff) return;
+            googleOff = value;
+            googleBackoffUntil = DateTime.MinValue;
+            sentencesUntranslated = false;
+            Changed?.Invoke();
+        }
+    }
+
+    /// With Google left out, the last finished sentence went untranslated (the service failed): the
+    /// notes window says new lines show the original until it answers again.
+    public bool SentencesUntranslated
+    {
+        get => sentencesUntranslated;
+        private set
+        {
+            if (value == sentencesUntranslated) return;
+            sentencesUntranslated = value;
+            Changed?.Invoke();
+        }
+    }
+
+    public event Action? Changed;
 
     /// Names and terms the notes have settled on, e.g. "江充 (…; misheard as 江松)".
     public Func<IReadOnlyList<string>> Glossary { get; set; } = () => [];
@@ -179,10 +210,12 @@ public sealed class Translator(LingClient ling, HttpMessageHandler? google = nul
         return now - last >= TimeSpan.TicksPerSecond * 15 && Interlocked.CompareExchange(ref lastUnreachableTry, now, last) == last;
     }
 
-    /// The AI service (finished sentences only) → Google. Null when both fail.
+    /// The AI service (finished sentences only) → Google. Null when both fail. With GoogleOff the
+    /// service alone: drafts get nothing (they never go to the service) and show the original.
     public async Task<string?> Translate(string text, string source, string target, Kind kind, Priority priority = Priority.Translate)
     {
         if (source == target) return text;
+        if (kind == Kind.Draft && GoogleOff) return null;
         if (kind != Kind.Draft && ling.Usable && LingWorthTrying())
         {
             try
@@ -194,9 +227,19 @@ public sealed class Translator(LingClient ling, HttpMessageHandler? google = nul
                 if (names.Count > 0) prompt += "\nKnown names and terms (use these spellings): " + string.Join("; ", names);
                 prompt += "\nSubtitle: " + text;
                 var out_ = await ling.Chat(prompt, "Translate.", priority, maxTokens: 400, timeout: 6);
-                if (CleanTranslation(out_, target) is { } clean) return clean;
+                if (CleanTranslation(out_, target) is { } clean)
+                {
+                    if (GoogleOff) SentencesUntranslated = false;
+                    return clean;
+                }
             }
             catch (LingException e) { Log.Debug($"translate ling failed: {e.Message}"); }
+        }
+        if (GoogleOff)
+        {
+            // Left out on purpose: no attempt, so nothing counts as Google failing.
+            if (kind != Kind.Draft) SentencesUntranslated = true;
+            return null;
         }
         if (DateTime.UtcNow < googleBackoffUntil) return null;
         try { return await Google(text, source, target); }

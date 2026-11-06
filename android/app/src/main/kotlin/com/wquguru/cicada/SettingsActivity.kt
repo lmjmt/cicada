@@ -3,14 +3,12 @@ package com.wquguru.cicada
 import android.app.Activity
 import android.content.ClipboardManager
 import android.content.Intent
-import android.content.res.ColorStateList
 import android.net.Uri
 import android.os.Bundle
 import android.provider.Settings
 import android.view.Gravity
 import android.view.View
 import android.widget.LinearLayout
-import android.widget.Switch
 import cicada.AIKey
 import cicada.Languages
 import cicada.Log
@@ -72,19 +70,19 @@ class SettingsActivity : Activity() {
         // on the Mac or Windows; the helper says so.
         page.addView(ui.sectionLabel(L("听对方")))
         page.addView(ui.group(listOf(
-            switchRow(L("说话人识别"), L("显示 Mac 和 Windows 上分出的说话人；这台手机还不能按声音分人"), s.speakerVoices) { s.speakerVoices = it; app.saveSettings() },
-            switchRow(L("保存会议录音"), L("只存在这台手机上，会议记录里能回放原声"), s.recordAudio) { s.recordAudio = it; app.saveSettings() })))
+            ui.switchRow(L("说话人识别"), L("显示 Mac 和 Windows 上分出的说话人；这台手机还不能按声音分人"), s.speakerVoices) { s.speakerVoices = it; app.saveSettings() },
+            ui.switchRow(L("保存会议录音"), L("只存在这台手机上，会议记录里能回放原声"), s.recordAudio) { s.recordAudio = it; app.saveSettings() })))
 
         page.addView(ui.sectionLabel(L("我说 · 面对面")))
         page.addView(ui.group(listOf(
-            switchRow(L("把我说的翻译给对方"), L("按住说话，松开后用对方的语言读出来"), s.speakBack) { s.speakBack = it; app.saveSettings() },
+            ui.switchRow(L("把我说的翻译给对方"), L("按住说话，松开后用对方的语言读出来"), s.speakBack) { s.speakBack = it; app.saveSettings() },
             ui.listRow(L("试一句"), AiServiceActivity.cloudVoice(app)?.let { Strings.LF("用 %@ 的声音读一句英语", it) } ?: L("用手机的声音读一句英语"), trailing = ui.icon(R.drawable.i_play, 20, Palette.ink), chevron = false) { tryVoice() })))
 
         page.addView(ui.sectionLabel(L("在其他应用上")))
         val rows = mutableListOf<View>(
-            switchRow(L("悬浮窗"), L("切到其他应用时，在上面显示字幕或纪要"), s.overlay) { s.overlay = it; app.saveSettings(); if (!it) app.overlay.hide() },
+            ui.switchRow(L("悬浮窗"), L("切到其他应用时，在上面显示字幕或纪要"), s.overlay) { s.overlay = it; app.saveSettings(); if (!it) app.overlay.hide() },
             choiceRow(L("样式"), listOf("notes" to L("实时纪要"), "subtitles" to L("字幕条")), s.view) { app.setView(it) },
-            switchRow(L("共享屏幕时让对方看到"), L("关闭时，截图和录屏里看不到悬浮窗"), s.showInCapture) { s.showInCapture = it; app.saveSettings(); app.overlay.rebuild() })
+            ui.switchRow(L("共享屏幕时让对方看到"), L("关闭时，截图和录屏里看不到悬浮窗"), s.showInCapture) { s.showInCapture = it; app.saveSettings(); app.overlay.rebuild() })
         if (!app.canOverlay) rows.add(0, ui.listRow(L("开启“显示在其他应用上层”"), null, leading = ui.icon(R.drawable.i_pip, 22, Palette.link)) {
             OverlayGuideActivity.open(this, direct = true)
         })
@@ -136,34 +134,6 @@ class SettingsActivity : Activity() {
         ui.listRow(label, helper, trailing = value(options.firstOrNull { it.first == selected }?.second ?: selected)) {
             ui.choose(this, label, options, selected) { changed(it); shown = null; build() }
         }
-
-    /// A row with a switch; the whole row toggles it.
-    private fun switchRow(label: String, helper: String, on: Boolean, changed: (Boolean) -> Unit): LinearLayout {
-        val sw = Switch(this).apply {
-            isChecked = on
-            val states = arrayOf(intArrayOf(android.R.attr.state_checked), intArrayOf())
-            thumbTintList = ColorStateList(states, intArrayOf(android.graphics.Color.WHITE, Palette.secondary))
-            trackTintList = ColorStateList(states, intArrayOf(Palette.ink, Palette.outline))
-            // The framework track is drawn faded; SRC paints the tint at full strength.
-            trackTintMode = android.graphics.PorterDuff.Mode.SRC
-            importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
-            isClickable = false
-        }
-        lateinit var row: LinearLayout
-        row = ui.listRow(label, helper, trailing = sw, chevron = false) {
-            sw.isChecked = !sw.isChecked
-            changed(sw.isChecked)
-            row.stateDescription = if (sw.isChecked) L("已开启") else L("已关闭")
-        }
-        row.stateDescription = if (on) L("已开启") else L("已关闭")
-        row.accessibilityDelegate = object : View.AccessibilityDelegate() {
-            override fun onInitializeAccessibilityNodeInfo(host: View, info: android.view.accessibility.AccessibilityNodeInfo) {
-                super.onInitializeAccessibilityNodeInfo(host, info)
-                info.className = "android.widget.Switch"; info.isCheckable = true; info.isChecked = sw.isChecked
-            }
-        }
-        return row
-    }
 
     /// A sample of how my words will sound to them (the Mac's 试一句), in English.
     private fun tryVoice() {

@@ -76,6 +76,7 @@ class Controller:
         self.notes = NotesEngine(self.ling, self.store)
         # 纪要语言 for notes written outside a meeting too (生成纪要 in the records window).
         self.translator = Translator(self.ling)
+        self.translator.google_off = self.settings.google_off
         self.listen = ListenEngine(self.ling, self.translator, self.store, self.notes, self.settings)
         # 同声传译: my microphone → the AI service → 知了 麦克风. The listen side's loudness feeds its echo check.
         from ..core.speak import SpeakEngine
@@ -83,8 +84,10 @@ class Controller:
         self.room = VirtualMic()
         # 电脑和会议室: the online voices taken out of the room mic (module-echo-cancel).
         self.echo = EchoCanceller()
-        self.online_prompt = None    # 线上也有人？: the meeting app in a call, while only the room is heard
-        self.online_answered = False
+        # Debug (roomEcho on): the room mic through the canceller. Off by default, as on the Mac: there
+        # the system's echo cancellation let no echo through but lost most of what the table said;
+        # the measured gate (roommic.EchoGate) and EchoMatch are what's left on by default.
+        self.room_echo_cancel = False
         self.headset_default = False  # the default input is a Bluetooth headset's (the room uses another mic)
         self.forced_room_mic = None
         self.speak = SpeakEngine(self.ling, self.translator, self.settings, self.store, self.listen, player=lambda: Player())
@@ -95,6 +98,9 @@ class Controller:
         self.listen.speakers = self.speakers
         self.namer = speakers.Namer(self.ling, self.store, self.changed)
         self.listen.on_voice = self.namer.guess
+        # 保存会议录音: only where GStreamer can write AAC (stock Ubuntu can't, see media.py).
+        self.listen.recorder = self._recorder
+        threading.Thread(target=self._finish_recordings, name="Rewrap", daemon=True).start()
         self.notes.voices = lambda: self.settings.speakerVoices
         self.speak.on_change(self.changed)
         self.listen.on_change(self.changed)
@@ -126,6 +132,29 @@ class Controller:
         self._notified = False
         GLib.timeout_add_seconds(1, self._tick)
         GLib.timeout_add_seconds(2, self._watch_end)
+
+    @property
+    def can_record(self) -> bool:
+        from . import media
+        return media.encoder() is not None
+
+    def _recorder(self, sid: str):
+        """The new meeting's recorder, or None (setting off, or no AAC encoder here)."""
+        from . import media
+        media.rescan()  # formats installed since launch record this meeting
+        if not self.settings.recordAudio or media.encoder() is None:
+            return None
+        rec = media.Recorder(self.store.audio_path(sid))
+        rec.on_finished = lambda: GLib.idle_add(lambda: self.changed() and False)
+        return rec
+
+    def _finish_recordings(self) -> None:
+        """A meeting the app didn't get to close: its system.aac becomes system.m4a now (the Mac's load())."""
+        from . import media
+        for sid in self.store.unfinished_audio():
+            if media.finish(self.store.audio_path(sid)):
+                self.store.set_has_audio(sid)
+        GLib.idle_add(lambda: self.changed() and False)
 
     def _tick(self) -> bool:
         if self.tray is not None and self.listen.listening:
@@ -237,6 +266,8 @@ class Controller:
         self.notes_window.show_all()
 
     def show_records(self) -> None:
+        from . import media
+        media.rescan()  # a recording plays once the formats are installed, no restart
         if self.records_window is None:
             from .records_window import RecordsWindow
             self.records_window = RecordsWindow(self)
@@ -246,8 +277,9 @@ class Controller:
         self.records_window.present()
         self.records_window.set_focus(None)  # not the search box: its placeholder would vanish
 
-    def show_settings(self, ai: bool = False) -> None:
-        """设置; `ai`: at AI 服务 (its first section), where every AI problem is fixed."""
+    def show_settings(self, ai: bool = False, general: bool = False) -> None:
+        """设置; `ai`: at AI 服务 (its first section), where every AI problem is fixed; `general`: at 通用
+        (保存会议录音, from a record that has none)."""
         if self.settings_window is None:
             from .settings_window import SettingsWindow
             self.settings_window = SettingsWindow(self)
@@ -259,6 +291,8 @@ class Controller:
         self.settings_window.present()
         if ai:
             self.settings_window.scroll.get_vadjustment().set_value(0)
+        elif general:
+            self.settings_window.scroll_to_general()
 
     # Setup (会议记录 › 还差几步 and the capsule)
 
@@ -365,9 +399,20 @@ class Controller:
 
     def ai_changed(self) -> None:
         """The service, its address, models or key changed: forget the old check and check again."""
+        self.translator.google_off = self.settings.google_off
         self.ling.key_changed()
         if self.ling.has_key:
             threading.Thread(target=self.ling.check, daemon=True).start()
+
+    def set_custom_only(self, on: bool) -> None:
+        """语音和文字只发给你的服务: Google is never asked while the custom service is in use. Nothing
+        to check again: only where translations go changes."""
+        self.settings.aiCustomOnly = on
+        self.settings.save()
+        self.translator.google_off = self.settings.google_off
+        if self.settings_window is not None:
+            self.settings_window.show_key_state()  # the switch, its grey line and the footnote
+        self.changed()
 
     def recheck(self) -> None:
         """重新检查: the AI service, step by step, off the main loop."""
@@ -462,25 +507,28 @@ class Controller:
             Log.d("room mic: none, listening to the computer instead")
         return SystemAudio(), "system"
 
-    def set_listen_source(self, value: str) -> None:
-        """听哪里 changed, from the tray, the notes window or 设置; mid-meeting the same meeting goes on
-        from the new source."""
-        if value not in AppSettings.SOURCES or value == self.settings.listenSource:
+    @property
+    def mic_on(self) -> bool:
+        return self.settings.listenSource == "both"
+
+    def set_mic(self, on: bool) -> None:
+        """打开麦克风 / 关闭麦克风, from the tray, the notes window or the debug pipe (the Mac's setMic):
+        the computer's audio is always heard, the mic adds the room to the same meeting. Not kept for
+        the next launch; turning it on while nothing is heard starts listening."""
+        value = "both" if on else "system"
+        if value == self.settings.listenSource:
+            if on and not self.listen.listening:
+                self.start_listening(*self.heard_source())
             return
         self.settings.listenSource = value
-        self.settings.save()
-        Log.d("listenSource=%s" % value)
+        Log.d("mic %s" % ("on" if on else "off"))
         if self.listen.listening and self.listen.source_kind != "file":
-            if self.listen.hears_room_too:
+            if on:
+                self._start_room_side()
+            else:
                 self._stop_room_side()
-            # The canceller first: it changes the default output, which the computer's audio is read from.
-            room = self._room_side_source() if value == "both" else None
-            source, kind = self.heard_source()
-            source.on_ended = self._source_ended(kind)
-            self.listen.source_kind = kind
-            self.listen.attach(source, mic=kind == "room")
-            if room is not None:
-                self.listen.start_room(*room)
+        elif on and not self.listen.listening:
+            self.start_listening(*self.heard_source())
         self.changed()
 
     def _room_side_source(self):
@@ -494,12 +542,12 @@ class Controller:
         default = capture.default_source()
         bt = [i.name for i in roommic.parse_sources(capture.sources_text()) if i.bluetooth]
         self.headset_default = (self.room.real_mic if default == "cicada_mic" else default) in bt
-        cancelled = None if self.settings.speakHeadphones else self.echo.create(mic)
-        if cancelled is None and not self.settings.speakHeadphones:
-            Log.d("hybrid: no echo cancellation, gating the room mic")
+        cancelled = self.echo.create(mic) if self.room_echo_cancel else None
+        if cancelled is None:
+            Log.d("hybrid: the room mic, gated while the computer plays speech that reaches it")
         source = SystemAudio(cancelled or mic, L("知了 · 会议室"))
         source.on_ended = self._room_lost
-        return source, cancelled is None and not self.settings.speakHeadphones
+        return source, cancelled is None
 
     def _start_room_side(self) -> None:
         room = self._room_side_source()
@@ -524,30 +572,12 @@ class Controller:
             self.echo.remove()
 
     def set_headphones(self, on: bool) -> None:
-        """戴着耳机 (同声传译's and 会议室's): in 电脑和会议室 the room side starts again with or without
-        taking the speakers' sound out."""
+        """戴着耳机 (同声传译's): whether a sentence said while they talk may be their voice from the
+        speakers. The room mic measures that for itself (roommic.EchoGate)."""
         if on == self.settings.speakHeadphones:
             return
         self.settings.speakHeadphones = on
         self.settings.save()
-        if self.listen.listening and self.listen.hears_room_too:
-            self._stop_room_side()
-            self._start_room_side()
-        self.changed()
-
-    def hybrid_note(self) -> str | None:
-        """The grey line under 听哪里 in 电脑和会议室 (roommic.hybrid_note)."""
-        key = roommic.hybrid_note(self.listen.hears_room_too, self.echo.on, self.settings.speakHeadphones,
-                                  self.headset_default)
-        return L(key) if key == "线上有人说话时，先不听会议室" else L("用电脑自带的麦克风听会议室") if key else None
-
-    def answer_online(self, both: bool) -> None:
-        """线上也有人？ answered: 也听电脑 turns 电脑和会议室 on in the same meeting; 不用 just goes."""
-        self.online_answered = True
-        self.online_prompt = None
-        Log.d("online prompt: %s" % ("both" if both else "no"))
-        if both:
-            self.set_listen_source("both")
         self.changed()
 
     def _source_ended(self, kind: str):
@@ -633,8 +663,6 @@ class Controller:
         self.auto_ended = False
         self.ending = None
         self.end_watch = meeting_end.MeetingEndWatch(self.end_config(), time.time())
-        self.online_answered = False
-        self.online_prompt = None
         self.notices.start()
         room = self._room_side_source() if kind == "both" else None
         self.listen.start(source, kind, mic=kind == "room")
@@ -734,12 +762,6 @@ class Controller:
             s = self.store.get(self.listen.session_id) if self.listen.session_id else None
             reason = w.tick(now, calls, bool(s and s.lines))
             self._set_ending(w.pending)
-            ask = roommic.asks_online(self.listen.source_kind == "room", self.online_answered, bool(calls))
-            prompt = next(iter(calls.values()), None) if ask else None
-            if prompt != self.online_prompt:
-                self.online_prompt = prompt
-                Log.d("online prompt: %s" % ("shown" if prompt else "gone"))
-                self.changed()
             if reason is not None:
                 self._auto_end(reason, w)
         elif not self.listen.listening and self.auto_ended and self.settings.endWithApp and calls:
@@ -846,7 +868,6 @@ class Controller:
         self.auto_ended = auto
 
         # stop() waits for Ming's last replies: off the main loop.
-        self.online_prompt = None
 
         def run():
             sid = self.listen.session_id

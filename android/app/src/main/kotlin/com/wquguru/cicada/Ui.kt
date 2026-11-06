@@ -107,6 +107,34 @@ class Ui(val context: Context) {
         setPadding(dp(padding), dp(padding), dp(padding), dp(padding))
     }
 
+    /// A row with a switch; the whole row toggles it.
+    fun switchRow(label: String, helper: String, on: Boolean, changed: (Boolean) -> Unit): LinearLayout {
+        val sw = android.widget.Switch(context).apply {
+            isChecked = on
+            val states = arrayOf(intArrayOf(android.R.attr.state_checked), intArrayOf())
+            thumbTintList = ColorStateList(states, intArrayOf(android.graphics.Color.WHITE, Palette.secondary))
+            trackTintList = ColorStateList(states, intArrayOf(Palette.ink, Palette.outline))
+            // The framework track is drawn faded; SRC paints the tint at full strength.
+            trackTintMode = android.graphics.PorterDuff.Mode.SRC
+            importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
+            isClickable = false
+        }
+        lateinit var row: LinearLayout
+        row = listRow(label, helper, trailing = sw, chevron = false) {
+            sw.isChecked = !sw.isChecked
+            changed(sw.isChecked)
+            row.stateDescription = if (sw.isChecked) cicada.Strings.L("已开启") else cicada.Strings.L("已关闭")
+        }
+        row.stateDescription = if (on) cicada.Strings.L("已开启") else cicada.Strings.L("已关闭")
+        row.accessibilityDelegate = object : View.AccessibilityDelegate() {
+            override fun onInitializeAccessibilityNodeInfo(host: View, info: android.view.accessibility.AccessibilityNodeInfo) {
+                super.onInitializeAccessibilityNodeInfo(host, info)
+                info.className = "android.widget.Switch"; info.isCheckable = true; info.isChecked = sw.isChecked
+            }
+        }
+        return row
+    }
+
     /// A white group of rows with thin dividers (lists, settings).
     fun group(rows: List<View>, radius: Int = 22) = LinearLayout(context).apply {
         orientation = LinearLayout.VERTICAL

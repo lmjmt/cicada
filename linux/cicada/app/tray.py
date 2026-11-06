@@ -93,17 +93,12 @@ class Tray:
             self.detail_item = None
         menu.append(Gtk.SeparatorMenuItem())
         item(L("结束") if listening else L("开始听"), self.app.request_stop)
-        # 听哪里, the Mac panel's choice: changed mid-meeting, the same meeting goes on.
+        # 麦克风, the Mac panel's 打开麦克风: on mid-meeting, the room joins the same meeting.
         if self.app.listen.source_kind != "file" or not listening:
-            menu.append(Gtk.SeparatorMenuItem())
-            item(L("听哪里"), None, False)
-            first = None
-            for value, label in sources():
-                r = Gtk.RadioMenuItem.new_with_label_from_widget(first, label)
-                first = first or r
-                r.set_active(value == self.app.settings.listenSource)
-                r.connect("toggled", lambda w, v=value: w.get_active() and self.app.set_listen_source(v))
-                menu.append(r)
+            mic = Gtk.CheckMenuItem.new_with_label(L("麦克风"))
+            mic.set_active(self.app.mic_on)
+            mic.connect("toggled", lambda w: self.app.set_mic(w.get_active()))
+            menu.append(mic)
             menu.append(Gtk.SeparatorMenuItem())
         if self.app.settings.speakEnabled:
             item(L("停止说") if self.app.speak.active else L("开始说"), self.app.toggle_speaking)
@@ -158,13 +153,6 @@ class Tray:
         if self.detail_item is not None:
             self.detail_item.set_label(self._detail())
         self.lib.app_indicator_set_label(self.ind, self._clock().encode(), b"")
-
-
-def sources() -> list:
-    """听哪里's choices, as the tray, the notes window and 设置 list them."""
-    from ..core.settings import AppSettings
-    names = {"system": L("电脑声音"), "room": L("会议室"), "both": L("电脑和会议室")}
-    return [(v, names[v]) for v in AppSettings.SOURCES]
 
 
 def badged_icon(icon: str) -> str | None:

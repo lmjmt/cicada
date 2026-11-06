@@ -36,6 +36,10 @@ final class ListenEngine {
     var onTranslated: ((_ segmentID: Int, _ translation: String) -> Void)?
     /// Diagnostics: how long a sentence took from its last new words to its translation on screen.
     var onTiming: ((SentenceTiming) -> Void)?
+    /// The recognizer heard words (a draft or a line), whether or not they are shown.
+    var onWords: (() -> Void)?
+    /// The room mic stayed digital silence even after it was opened again (`RoomMic.onSilent`).
+    private(set) var roomMicSilent = false
 
     let settings: AppSettings
     let router = AudioRouter()
@@ -124,8 +128,6 @@ final class ListenEngine {
     /// The Mac reading a translation aloud, or the talk key held: the room mic hears silence then.
     private var roomMuted = false
     private var startedAt = Date()
-    /// Listening to the Mac, and it has played nothing since the start: maybe the meeting is in the room.
-    private(set) var macSilent = false
     private var recognizer: RecognitionStream?
     private var resultsTask: Task<Void, Never>?
     /// The room engine's clocks and segment ids start far above the main one's, so lines from the two
@@ -346,7 +348,6 @@ final class ListenEngine {
         cloudBack = nil
         serverFellBack = false
         startedAt = Date()
-        macSilent = false
         updateHold()
         debugLog("listen start mode=\(settings.sourceMode) target=\(resolvedTarget)")
 
@@ -436,6 +437,7 @@ final class ListenEngine {
         let tap = SystemAudioTap()
         let router = self.router
         tap.onAudio = { pcm in router.push(pcm) }
+        tap.onRateChange = { [weak self] in MainActor.assumeIsolated { self?.reconnectAudio() } }
         do {
             try tap.start()
             audioTap = tap
@@ -488,6 +490,14 @@ final class ListenEngine {
         let mic = RoomMic(device: roomDevice?())
         mic.muted = roomMuted
         if role == .room { mic.echoGate = echoGate }
+        roomMicSilent = false
+        mic.onSilent = { [weak self, weak mic] in
+            MainActor.assumeIsolated {
+                guard let self, let mic, self.audioTap === mic else { return }
+                self.roomMicSilent = true
+                self.onStateChange?()
+            }
+        }
         let router = self.router
         mic.onAudio = { pcm in router.push(pcm) }
         do {
@@ -732,6 +742,8 @@ final class ListenEngine {
         guard gen == generation, isRunning else { return }
         failureStreak = 0
         var text = result.text.trimmingCharacters(in: .whitespacesAndNewlines)
+        // Before any holding for the language: words at all is what tells speech from music.
+        if !text.isEmpty { onWords?() }
         if result.isFinal {
             text = HeardText.clean(text)
             let fuller = HeardText.fuller(final: text, draft: volatileText)
@@ -1259,14 +1271,6 @@ final class ListenEngine {
                 guard self.ticks % 4 == 0 else { return }
                 self.translateVolatile()
                 self.maybeDetectLanguage()
-                let silent = self.role == .main && RoomPrompt.asks(room: self.settings.hearsRoom,
-                                             listened: Date().timeIntervalSince(self.startedAt),
-                                             voiced: self.router.stats().voicedTotal)
-                if silent != self.macSilent {
-                    self.macSilent = silent
-                    debugLog("mac silent \(silent)")
-                    self.onStateChange?()
-                }
                 if self.ticks % 20 == 0 { self.checkDictation() }
                 // The fetch's progress, and 听不出 coming or going, redraw the windows.
                 if let back = self.cloudBack, Date().timeIntervalSince(back.at) > 6 { self.cloudBack = nil }

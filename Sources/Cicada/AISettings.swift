@@ -64,6 +64,7 @@ struct AISettingsView: View {
                 Divider()
                 hearSection
             }
+            SettingsCard { onlyRow }
             HStack(spacing: 6) {
                 Image(systemName: "lock").font(.system(size: 11)).foregroundStyle(Palette.tertiary)
                 Text(lockLine).font(.system(size: 11)).foregroundStyle(Palette.tertiary).fixedSize(horizontal: false, vertical: true)
@@ -118,6 +119,34 @@ struct AISettingsView: View {
                 .font(.system(size: 11)).foregroundStyle(Palette.tertiary)
                 .fixedSize(horizontal: false, vertical: true).padding(.leading, 42)
         }
+    }
+
+    /// 语音和文字只发给你的服务: Google is never asked. The grey line says what it costs, and while
+    /// the service can't be reached, what stands in (this Mac's translation, or the original only).
+    private var onlyRow: some View {
+        let on = settings.aiCustomOnly
+        let failure = ling.aiCheck.failure
+        let down = on && ling.hasKey && !ling.aiCheck.running && failure != nil && failure?.reason != .busy
+        let detail = !down ? L("不用 Google 翻译；说话时要等整句说完才出译文")
+            : Recognition.hasOnDeviceTranslation ? L("现在连不上：整句先用本机翻译，半句只显示原文")
+            : L("现在连不上：新字幕暂时只有原文")
+        return SettingsRow(title: L("语音和文字只发给你的服务"), detail: detail, divider: false) {
+            Toggle("语音和文字只发给你的服务", isOn: Binding(get: { settings.aiCustomOnly }, set: {
+                settings.aiCustomOnly = $0
+                model.applyAIService()
+            }))
+            .toggleStyle(.switch).labelsHidden().controlSize(.small).tint(Palette.ink)
+        }
+    }
+
+    /// Where the custom service's audio and text go: one host when every use shares it.
+    private var customHosts: String {
+        let c = settings.aiConfig
+        var hosts = [c.base?.host]
+        if c.hasVoices { hosts.append(c.voiceBase?.host) }
+        if c.transcribes { hosts.append(c.hearBase?.host) }
+        let set = Set(hosts.compactMap { $0 })
+        return set.count == 1 ? set.first! : L("你填的地址")
     }
 
     private var textHost: String { AIProvider.customBase(baseDraft)?.host ?? settings.aiConfig.base?.host ?? "" }
@@ -179,7 +208,7 @@ struct AISettingsView: View {
                 if let hint = keyHint {
                     Text(hint.text).font(.system(size: 12)).foregroundStyle(Palette.error).fixedSize(horizontal: false, vertical: true)
                 }
-                if let slow = check.slowLine() {
+                if let slow = check.slowLine(googleOff: settings.aiCustomOnly) {
                     Text(slow).font(.system(size: 12)).foregroundStyle(Palette.warn).fixedSize(horizontal: false, vertical: true)
                 }
                 if showSteps {
@@ -641,6 +670,7 @@ struct AISettingsView: View {
         case .custom:
             let nearby = settings.aiConfig.base.map { AIProvider.isNearby($0.absoluteString) } ?? false
             let cost = nearby ? L("跑在你自己的机器上，不按量计费。") : L("费用以这个服务为准。")
+            if settings.aiCustomOnly { return cost + L("会议的语音和文字只发给 \(customHosts)，不经过 Google 等外部服务。") }
             return cost + (settings.aiConfig.transcribes ? L("会议的声音会发给你的服务识别。") : L("发出去的只有文字，语音识别留在本机。"))
         default: return L("按所选模型计费。发出去的只有文字，语音识别留在本机。")
         }

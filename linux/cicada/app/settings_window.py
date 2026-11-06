@@ -200,9 +200,12 @@ class SettingsWindow(Gtk.Window):
         page.pack_start(self._group(L("正在听时"), ui.boxed([
             ui.prow(L("悬浮窗"), ui.segmented([("notes", L("实时纪要")), ("subtitles", L("字幕条"))], s.view, app.set_view)),
             ui.prow(L("登录时打开"), switch, L("登录后在顶栏待命")),
-            self._voices_row(),
             self._shortcut_row(),
             warn_row])), False, False, 0)
+
+        # 通用, the Mac's records section: what each meeting keeps.
+        self.general = self._group(L("通用"), ui.boxed([self._record_row(), self._voices_row()]))
+        page.pack_start(self.general, False, False, 0)
 
         room_group, room_combos = self._room_group()
         page.pack_start(room_group, False, False, 0)
@@ -310,6 +313,47 @@ class SettingsWindow(Gtk.Window):
             button.set_visible(False)
             button.set_no_show_all(True)
         return ui.prow(title, box, L("在任何窗口里都能用"))
+
+    def _record_row(self) -> Gtk.Widget:
+        """保存会议录音: on by default, as on the Mac; greyed out, saying why, without an AAC encoder.
+        Checked again each time Settings shows: the formats may have been installed meanwhile."""
+        app = self.app
+        sw = Gtk.Switch()
+        sw.set_valign(Gtk.Align.CENTER)
+        hint = ui.text("", 11, "tertiary", width_chars=50)
+        state = {"ok": False}
+
+        def check(*_):
+            from . import media
+            media.rescan()
+            ok = state["ok"] = app.can_record
+            sw.set_active(ok and app.settings.recordAudio)
+            sw.set_sensitive(ok)
+            ui.retext(hint, L("只存在这台电脑上") if ok else L("这台电脑缺少 AAC 编码器，装上“第三方媒体格式”后可用"))
+
+        def toggled(w, _p):
+            if not state["ok"]:
+                return
+            app.settings.recordAudio = w.get_active()
+            app.settings.save()
+            app.settings_changed()
+        check()
+        sw.connect("notify::active", toggled)
+        self.connect("show", check)
+        return ui.prow(L("保存会议录音"), sw, subtitle_widget=hint)
+
+    def scroll_to_general(self) -> None:
+        """Brings 通用 into view (the records window's 保存会议录音 link), once it is laid out."""
+        def go():
+            # In the page's own coordinates (the viewport's are shifted by the current scroll).
+            pos = self.general.translate_coordinates(self.scroll.get_child().get_child(), 0, 0)
+            if pos is not None:
+                self.scroll.get_vadjustment().set_value(max(0, pos[1] - 8))
+            return False
+        # A window just shown isn't laid out yet, and its show handlers then hide rows above 通用: once
+        # it has a size, and again once those are gone.
+        GLib.timeout_add(150, go)
+        GLib.timeout_add(500, go)
 
     def _voices_row(self) -> Gtk.Widget:
         """说话人识别: on by default, as on the Mac; off when this build has no voiceprint library."""
@@ -422,7 +466,6 @@ class SettingsWindow(Gtk.Window):
 
         def phones_toggled(sw, _p):
             self.app.set_headphones(sw.get_active())
-            self.room_phones.set_active(sw.get_active())  # 会议室's 戴着耳机 is the same setting
         phones.connect("notify::active", phones_toggled)
         self.speak_phones = phones
         phones_row = ui.prow(L("戴着耳机"), phones, L("和对方同时说的话也会传出去"))
@@ -443,13 +486,12 @@ class SettingsWindow(Gtk.Window):
         return ui.vbox(6, self._group(L("同声传译"), ui.boxed(rows)), ui.pad(self.speak_status, 0, 4, 0, 4))
 
     def _room_group(self):
-        """会议室: 听哪里, and the microphone that hears the room (自动 picks as roommic.pick does)."""
+        """会议室: the microphone 打开麦克风 hears the room with (自动 picks as roommic.pick does). Whether
+        it hears the speakers is measured (roommic.EchoGate), not asked."""
         from ..core import roommic
         from . import capture
-        from .tray import sources
         app = self.app
         s = app.settings
-        where = choice(sources(), s.listenSource, app.set_listen_source)
         inputs = [i for i in roommic.parse_sources(capture.sources_text()) if not i.virtual]
         default = capture.default_source()
         if default == "cicada_mic":
@@ -464,19 +506,8 @@ class SettingsWindow(Gtk.Window):
         if s.roomMic and all(v != s.roomMic for v, _ in options):
             options.append((s.roomMic, s.roomMic))  # chosen before, not plugged in now
         mic = choice(options, s.roomMic, set_mic)
-        # 戴着耳机, the same setting as 同声传译's: nothing comes out of the speakers, so no echo to take out.
-        phones = Gtk.Switch()
-        phones.set_active(s.speakHeadphones)
-        phones.set_valign(Gtk.Align.CENTER)
-        def toggled(sw, _p):
-            app.set_headphones(sw.get_active())
-            if getattr(self, "speak_phones", None) is not None:
-                self.speak_phones.set_active(sw.get_active())
-        phones.connect("notify::active", toggled)
-        self.room_phones = phones
-        rows = [ui.prow(L("听哪里"), where), ui.prow(L("麦克风"), mic, L("戴着蓝牙耳机时，自动用电脑自带的麦克风")),
-                ui.prow(L("戴着耳机"), phones, L("戴着就不用防回声，桌边的话不会被丢；和同声传译共用这个开关"))]
-        return self._group(L("会议室"), ui.boxed(rows)), [where, mic]
+        rows = [ui.prow(L("麦克风"), mic, L("戴着蓝牙耳机时，自动用电脑自带的麦克风"))]
+        return self._group(L("会议室"), ui.boxed(rows)), [mic]
 
     def _group(self, title, body, footer=None) -> Gtk.Widget:
         box = ui.vbox(6, ui.pad(ui.text(title, 12, "group-title", bold=True, wrap=False), 0, 0, 0, 2), body)
@@ -639,7 +670,14 @@ class SettingsWindow(Gtk.Window):
                                  ("hear", L("听对方"), hear_body)):
             rows.append(ui.vbox(0, self._custom_head(sid, title), self._custom_body(sid, body)))
         hint = ui.text(L("每样可以接不同的机器；这台电脑和局域网里的服务可以用 http。"), 12, "tertiary", width_chars=60)
-        page = ui.vbox(6, ui.pad(hint, 0, 2, 0, 2), ui.boxed(rows))
+        # 语音和文字只发给你的服务 (AISettings.swift › onlyRow): Google is never asked. The grey line says
+        # what it costs, and while the service can't be reached, that new lines are the original only.
+        self.only_switch = Gtk.Switch()
+        self.only_switch.set_active(s.aiCustomOnly)
+        self.only_switch.connect("notify::active", self._only_toggled)
+        self.only_detail = ui.text(L("不用 Google 翻译；说话时要等整句说完才出译文"), 11, "tertiary", width_chars=50)
+        only = ui.boxed([ui.prow(L("语音和文字只发给你的服务"), self.only_switch, subtitle_widget=self.only_detail)])
+        page = ui.vbox(6, ui.pad(hint, 0, 2, 0, 2), ui.boxed(rows), only)
         page.set_no_show_all(True)
         for w in page.get_children():
             w.show_all()
@@ -648,6 +686,10 @@ class SettingsWindow(Gtk.Window):
         for body in self.custom_bodies.values():
             body.set_visible(False)
         return page
+
+    def _only_toggled(self, w, _p) -> None:
+        if w.get_active() != self.app.settings.aiCustomOnly:
+            self.app.set_custom_only(w.get_active())
 
     @staticmethod
     def _label(title: str) -> Gtk.Widget:
@@ -783,7 +825,7 @@ class SettingsWindow(Gtk.Window):
         head("text", state, "%s · %s" % (host, c.text_model) if host and c.text_model else L("填上地址和模型"), trailing,
              "warn" if r.slow else "stepwhy" if text_failed and have else "")
         ui.clear(self.custom_text_status)
-        slow = r.slow_line()
+        slow = r.slow_line(google_off=s.aiCustomOnly)  # this page is the custom service's
         if slow:
             self.custom_text_status.pack_start(ui.text(slow, 12, "warn", width_chars=46), False, False, 0)
         if have and aicheck_view.show_steps(r) and (text_failed or r.running or r.busy):
@@ -832,6 +874,13 @@ class SettingsWindow(Gtk.Window):
             self.custom_hear_status.pack_start(ui.text(L("地址要用 https；这台电脑和局域网里的服务可以用 http。"), 12, "stepwhy",
                                                        width_chars=46), False, False, 0)
         self.custom_hear_status.show_all()
+        # 语音和文字只发给你的服务: set by a debug command too. Linux has no translation of its own to
+        # stand in while the service can't be reached.
+        on = s.aiCustomOnly
+        if self.only_switch.get_active() != on:
+            self.only_switch.set_active(on)  # _only_toggled sees it already saved
+        down = on and have and not r.running and f is not None and f[1] != aicheck.BUSY
+        ui.retext(self.only_detail, L("现在连不上：新字幕暂时只有原文") if down else L("不用 Google 翻译；说话时要等整句说完才出译文"))
         # A service that isn't set up yet, or doesn't work, opens where it needs filling in.
         if not getattr(self, "_custom_opened", False):
             self._custom_opened = True
@@ -1037,7 +1086,11 @@ class SettingsWindow(Gtk.Window):
             # for the hear model's address (never 声音不出本机 on a port).
             from ..core.providers import is_nearby
             cost = L("跑在你自己的机器上，不按量计费。") if c.base and is_nearby(c.base) else L("费用以这个服务为准。")
-            ui.retext(self.footnote, cost + LF("听的时候，电脑里的声音会发给 %@。", app.ling.hear_host or L("你填的地址")))
+            if app.settings.aiCustomOnly:
+                from ..core.providers import only_host
+                ui.retext(self.footnote, cost + LF("会议的语音和文字只发给 %@，不经过 Google 等外部服务。", only_host(c) or L("你填的地址")))
+            else:
+                ui.retext(self.footnote, cost + LF("听的时候，电脑里的声音会发给 %@。", app.ling.hear_host or L("你填的地址")))
         else:
             ui.retext(self.footnote, LF("听的时候，电脑里的声音会发给 %@。", name) if p.id == "ling"
                       else L("按所选模型计费。") + LF("听的时候，电脑里的声音会发给 %@。", name))

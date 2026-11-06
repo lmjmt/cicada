@@ -72,42 +72,6 @@ struct VoiceGate {
     }
 }
 
-/// 在会议室里开会？: asked when listening to the Mac and it has played nothing for a minute. It
-/// only reads the system audio already being listened to, so the microphone stays closed.
-enum RoomPrompt {
-    static let after = 60.0
-
-    static func asks(room: Bool, listened: Double, voiced: Double) -> Bool {
-        !room && listened >= after && voiced < 1
-    }
-
-    /// Shown in the panel: asked, not answered this meeting, and no meeting app in a call (early
-    /// in a call nobody may have spoken yet; that silence is not a meeting in the room).
-    static func shows(silent: Bool, answered: Bool, inCall: Bool) -> Bool {
-        silent && !answered && !inCall
-    }
-
-    /// 线上也有人？: listening to the room alone while a meeting app on this Mac is in a call, so
-    /// people online are likely speaking through it. Only where the Mac and the room can be heard
-    /// together (not macOS 14/15), and once a meeting, like the question above. The call is the
-    /// sign, not the Mac's audio: in 会议室 the Mac's audio isn't listened to at all.
-    static func asksOnline(roomOnly: Bool, bothAvailable: Bool, answered: Bool, inCall: Bool) -> Bool {
-        roomOnly && bothAvailable && !answered && inCall
-    }
-}
-
-/// The grey line under 听哪里 while listening to the Mac and the room: how the room is being heard
-/// when that isn't the plain case. Echo cancellation off comes first: it changes what gets recorded.
-enum HybridNote {
-    static func line(roomRunning: Bool, echoCancelled: Bool, headsetDefault: Bool) -> String? {
-        guard roomRunning else { return nil }
-        if !echoCancelled { return L("线上有人说话时，先不听会议室") }
-        // A Bluetooth headset is the default input: the room is heard by the Mac's own mic (RoomMicPlan).
-        if headsetDefault { return L("用 Mac 麦克风听会议室") }
-        return nil
-    }
-}
-
 /// 外接麦克风断开了: the microphone hearing the room went away mid-meeting. Another takes over
 /// (`RoomMicPlan` among what's left); with none left, 电脑和会议室 goes on with the Mac alone and
 /// 会议室 pauses.
@@ -146,21 +110,134 @@ extension AudioDevices {
     }
 }
 
-/// 电脑和会议室 without echo cancellation: while the Mac plays speech, the room mic hears that speech
-/// again from the speakers. The main engine's audio queue `hold`s the gate on every loud block of the
-/// Mac's audio; the room mic hears silence until `hang` after the last one (the speakers' tail and the
-/// room's echo). Room speech over a remote speaker is lost this way: what `VoiceMic` is for.
+/// 打开麦克风 while the Mac plays a meeting: the room mic hears the remote voices again from the
+/// speakers. The room mic hears silence while the Mac plays speech, until `hang` after it (the
+/// speakers' tail and the room's echo), but only when that is needed and only for speech:
+///
+/// - Echo is measured, not assumed away: the room mic's level while the Mac is loud against its own
+///   floor while the Mac is quiet. Headphones, a meeting mic or a quiet speaker leave the mic where
+///   it was, and then nothing is silenced, so people at the table are heard over a remote speaker
+///   too. Until there is enough to tell (and whenever it is unclear) the speakers are taken to echo.
+/// - Music isn't speech: a loud stretch the Mac's recognizer has found no words in for `music`
+///   seconds stops closing the gate, so people at the table are heard over hold music or a video.
+///   Words heard again close it again (a voice over music echoes too).
+///
+/// Measured with the MacBook's speakers and a speaker at the table (ESP32, 10 cm from the mic):
+/// echo cancellation (`VoiceMic`) let 0 echoes through but lost most table lines even with nobody
+/// online speaking, so this gate, with `EchoMatch` behind it, is the default.
 final class EchoGate: @unchecked Sendable {
     static let hang = 0.4
+    /// Seconds of loud Mac audio without a word before it counts as music.
+    static let music = 4.0
+    /// A pause this long ends a loud stretch.
+    static let stretchGap = 1.5
+    /// Mac audio this recent makes a room block "during the Mac"; this long ago, "the Mac is quiet".
+    static let during = 0.15
+    static let quietAfter = 1.0
+    /// Room level during the Mac over the room's floor: at or over `echoRatio` there is echo, under
+    /// `clearRatio` there is none (the gap between them keeps it from flapping).
+    static let echoRatio: Float = 3
+    static let clearRatio: Float = 2
+    /// Seconds of each that a decision needs, and how much is kept.
+    static let enough = 3.0
+    static let window = 20.0
+
     private let lock = NSLock()
     private var until: Double = 0
+    private var lastLoud: Double = -.infinity
+    private var stretchStart: Double = -.infinity
+    private var lastWords: Double = -.infinity
+    /// Room mic blocks (time, rms, seconds) while the Mac is loud, and while it is quiet.
+    private var during: [(t: Double, rms: Float, s: Double)] = []
+    private var quiet: [(t: Double, rms: Float, s: Double)] = []
+    private var _echo = true
+    /// Debug (`roomEchoSim:<on|off>`): pretend the measurement says this.
+    var forced: Bool?
 
+    /// Forget what was measured: the speakers are taken to echo until measured again (a new
+    /// meeting, or the output moved between speakers and headphones).
+    func reset() {
+        lock.withLock {
+            during = []
+            quiet = []
+            _echo = true
+        }
+        debugLog("room echo: measuring again")
+    }
+
+    /// A loud block of the Mac's audio, on the main engine's audio queue.
     func hold(now: Double = CFAbsoluteTimeGetCurrent()) {
-        lock.withLock { until = max(until, now + Self.hang) }
+        lock.withLock {
+            if now - lastLoud > Self.stretchGap { stretchStart = now }
+            lastLoud = now
+            guard !musicLocked(now), echoLocked else { return }
+            until = max(until, now + Self.hang)
+        }
+    }
+
+    /// The Mac's recognizer heard words (a draft or a line).
+    func heardWords(now: Double = CFAbsoluteTimeGetCurrent()) {
+        lock.withLock {
+            lastWords = now
+            // The words were said a moment ago: close from now, so their echo is caught.
+            if now - lastLoud < Self.hang, echoLocked { until = max(until, lastLoud + Self.hang) }
+        }
     }
 
     func closed(now: Double = CFAbsoluteTimeGetCurrent()) -> Bool {
         lock.withLock { now < until }
+    }
+
+    /// Whether the speakers reach the room mic, as last measured.
+    var echo: Bool { lock.withLock { echoLocked } }
+    /// Whether the Mac is playing something loud that has no words in it.
+    func playingMusic(now: Double = CFAbsoluteTimeGetCurrent()) -> Bool { lock.withLock { musicLocked(now) } }
+
+    private var echoLocked: Bool { forced ?? _echo }
+
+    private func musicLocked(_ now: Double) -> Bool {
+        now - lastLoud <= Self.stretchGap && now - stretchStart >= Self.music && lastWords < now - Self.music
+    }
+
+    /// A block of what the room mic heard, before any silencing.
+    func roomLevel(_ rms: Float, seconds: Double, now: Double = CFAbsoluteTimeGetCurrent()) {
+        lock.withLock {
+            let since = now - lastLoud
+            // Music echoes like speech: it counts for the measurement.
+            if since <= Self.during { during.append((now, rms, seconds)) } else if since >= Self.quietAfter { quiet.append((now, rms, seconds)) } else { return }
+            during.removeAll { $0.t < now - Self.window }
+            quiet.removeAll { $0.t < now - Self.window * 3 }
+            if let ratio = Self.ratio(during: during.map { ($0.rms, $0.s) }, quiet: quiet.map { ($0.rms, $0.s) }) {
+                let was = _echo
+                if ratio >= Self.echoRatio { _echo = true } else if ratio < Self.clearRatio { _echo = false }
+                if was != _echo {
+                    debugLog("room echo: \(_echo ? "speakers reach the mic" : "none") (×\(String(format: "%.1f", ratio)))")
+                    if !_echo { until = 0 }
+                }
+            }
+        }
+    }
+
+    /// For `hybridState`: seconds of each kind of room block kept, their levels, and the ratio.
+    var summary: String {
+        lock.withLock {
+            let d = during.map(\.rms).sorted(), q = quiet.map(\.rms).sorted()
+            let mid = d.isEmpty ? 0 : d[d.count * 4 / 5], floor = q.isEmpty ? 0 : q[q.count / 5]
+            return String(format: "during=%.1fs p80=%.4f quiet=%.1fs floor=%.4f", during.reduce(0) { $0 + $1.s }, mid,
+                          quiet.reduce(0) { $0 + $1.s }, floor)
+        }
+    }
+
+    /// The room mic's loud end (a fifth of it louder) while the Mac is loud over its floor (the
+    /// quietest fifth) while the Mac is quiet, or nil without `enough` of both. Not the middle: echo
+    /// from a laptop's speakers is only a little over the room's noise between the words, and
+    /// clearly over it on them. People at the table talking over the Mac raise it too: that errs on
+    /// the side of echo.
+    static func ratio(during: [(Float, Double)], quiet: [(Float, Double)]) -> Float? {
+        guard during.reduce(0, { $0 + $1.1 }) >= enough, quiet.reduce(0, { $0 + $1.1 }) >= enough else { return nil }
+        let d = during.map(\.0).sorted(), q = quiet.map(\.0).sorted()
+        let floor = max(q[q.count / 5], 0.0002)
+        return d[d.count * 4 / 5] / floor
     }
 }
 
@@ -216,6 +293,8 @@ final class RoomMic: AudioSource {
 
     func start() throws {
         startedAt = Date()
+        silentSince = nil
+        silenceChecked = false
         AudioDevices.pinInput(engine, to: device)
         let input = engine.inputNode
         // The hardware format: after pinning, the client format can still be the system mic's,
@@ -233,6 +312,14 @@ final class RoomMic: AudioSource {
             out.frameLength = buf.frameLength
             let n = Int(buf.frameLength)
             let channels = Int(buf.format.channelCount)
+            if let src = buf.floatChannelData, channels > 0 {
+                if Self.simulateSilence { for c in 0..<channels { src[c].update(repeating: 0, count: n) } }
+                var sum: Float = 0
+                var sound = false
+                for i in 0..<n { let v = src[0][i]; sum += v * v; if v != 0 { sound = true } }
+                self.echoGate?.roomLevel((sum / Float(max(n, 1))).squareRoot(), seconds: Double(n) / format.sampleRate)
+                self.watchSilence(sound: sound)
+            }
             if self.muted || self.echoGate?.closed() == true || channels == 0 || buf.floatChannelData == nil {
                 dst.update(repeating: 0, count: n)
             } else if let src = buf.floatChannelData {
@@ -263,6 +350,41 @@ final class RoomMic: AudioSource {
             }
             defaultInputListener = listener
             AudioObjectAddPropertyListenerBlock(AudioObjectID(kAudioObjectSystemObject), &Self.defaultInputAddress, .main, listener)
+        }
+    }
+
+    // MARK: A microphone that delivers nothing
+
+    /// Seconds of nothing but digital zeros after a start that make the mic count as silent. A real
+    /// mic is never exactly zero, however quiet the room; a mic starved by another audio unit is.
+    static let silentAfter = 5.0
+    /// Debug (`roomMicSilent:on`): every block from the mic is zeros.
+    nonisolated(unsafe) static var simulateSilence = false
+    /// Called on the main queue when the mic stayed silent after being opened again.
+    var onSilent: (() -> Void)?
+    private var silentSince: Date?
+    private var silentRestarts = 0
+    private var silenceChecked = false
+
+    /// On the audio thread, per block: a mic silent since it started is opened again once, and
+    /// reported (`onSilent`) when it is still silent after that.
+    private func watchSilence(sound: Bool) {
+        guard !silenceChecked else { return }
+        if sound { silenceChecked = true; return }
+        let since = silentSince ?? Date()
+        silentSince = since
+        guard Date().timeIntervalSince(since) >= Self.silentAfter else { return }
+        silenceChecked = true
+        DispatchQueue.main.async { [weak self] in
+            guard let self, !self.stopped else { return }
+            if self.silentRestarts == 0 {
+                self.silentRestarts += 1
+                self.startedAt = .distantPast
+                self.restart("silent since it started")
+            } else {
+                debugLog("room mic: still silent after opening it again")
+                self.onSilent?()
+            }
         }
     }
 

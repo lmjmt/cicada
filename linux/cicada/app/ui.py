@@ -203,6 +203,22 @@ button.iconbtn.on { background-color: #F3F4F6; color: #15171C; }
 .sidebar list row:hover { background-color: #ECEEF1; }
 .group-label { font-weight: 700; color: #6B7080; }
 .transcript-row { border-top: 1px solid #EEF0F3; }
+.transcript-row.playing { background-color: #FDEEE7; }
+button.timelink { background-image: none; background-color: transparent; border: none; box-shadow: none; padding: 0; min-height: 0; min-width: 0; }
+button.timelink:hover label { text-decoration-line: underline; }
+
+/* The recording's player bar (RecordingPlayerBar): a soft box, a round ink play button, the played part in the accent. */
+.playerbar { background-color: #F5F6F8; border-radius: 10px; }
+button.playround { background-image: none; background-color: #15171C; border: none; box-shadow: none; border-radius: 16px; min-width: 32px; min-height: 32px; padding: 0; }
+button.playround:hover { background-color: #2A2D34; }
+button.playround image { color: #FFFFFF; }
+button.ratebtn { background-image: none; background-color: #FFFFFF; border: none; box-shadow: none; border-radius: 6px; min-height: 0; min-width: 0; padding: 2px 7px; }
+button.ratebtn:hover { background-color: #ECEEF1; }
+scale.playerscale { padding: 0; margin: 0; }
+scale.playerscale trough { background-image: none; background-color: #E2E4E9; border: none; box-shadow: none; border-radius: 2px; min-height: 4px; }
+scale.playerscale highlight { background-image: none; background-color: #E8552B; border: none; border-radius: 2px; min-height: 4px; }
+scale.playerscale slider { background-image: none; background-color: #FFFFFF; border: 1px solid #D5D8DE; box-shadow: 0 1px 2px rgba(0,0,0,0.18); border-radius: 7px; min-width: 12px; min-height: 12px; margin: -5px 0; }
+scale.playerscale slider:hover { background-color: #FFFFFF; border-color: #B9BDC6; }
 .spk1 { color: #0F7B6C; } .spk2 { color: #7A4CC2; } .spk3 { color: #B03A7A; } .spk4 { color: #8A5A00; }
 button.spkchip { background-image: none; background-color: #F2F3F5; border: none; box-shadow: none; border-radius: 11px; padding: 0 9px; min-height: 22px; }
 button.spkchip:hover { background-color: #E8EAEE; }
@@ -649,13 +665,17 @@ def boxed(rows) -> Gtk.Widget:
     return panel(box, "boxed")
 
 
-def prow(title: str, control: Gtk.Widget | None = None, subtitle: str | None = None, title_widget=None) -> Gtk.Widget:
-    """One preferences row: title (and a grey subtitle) on the left, its control on the right."""
+def prow(title: str, control: Gtk.Widget | None = None, subtitle: str | None = None, title_widget=None,
+         subtitle_widget=None) -> Gtk.Widget:
+    """One preferences row: title (and a grey subtitle) on the left, its control on the right.
+    `subtitle_widget`: a grey line the caller rewrites later, in place of `subtitle`."""
     row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
     left = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=1)
     left.set_valign(Gtk.Align.CENTER)
     left.pack_start(title_widget or text(title, 13, "ink", wrap=False, ellipsize=False), False, False, 0)
-    if subtitle:
+    if subtitle_widget is not None:
+        left.pack_start(subtitle_widget, False, False, 0)
+    elif subtitle:
         left.pack_start(text(subtitle, 11, "tertiary", width_chars=50), False, False, 0)
     row.pack_start(left, True, True, 0)
     if control is not None:

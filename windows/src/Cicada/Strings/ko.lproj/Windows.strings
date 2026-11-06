@@ -317,3 +317,9 @@
 "本机和局域网服务可不填" = "이 PC나 로컬 네트워크에서는 생략 가능";
 "例如 kokoro" = "예: kokoro";
 "例如 af_heart" = "예: af_heart";
+/* The talk key: the computer was playing through the press, so what the mic heard may be its echo. */
+"对方在说话时说的，没有说出去" = "상대방이 말하는 중이라 보내지 않았어요";
+"只存在这台电脑上" = "이 PC에만 저장됨";
+/* 打开麦克风: the Mac's words name the Mac. */
+"关着 · 只听电脑声音" = "꺼짐 · PC 소리만";
+"电脑声音照常在记" = "PC 소리는 계속 기록 중";

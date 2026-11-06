@@ -354,6 +354,7 @@ struct NotesWindowView: View {
                         .lineLimit(1).minimumScaleFactor(0.75)
                     Spacer(minLength: 8)
                     if live {
+                        MicButton(model: model, settings: settings, inHeader: true).padding(.trailing, 2)
                         Button(action: askToEnd) {
                             Text("结束").font(.system(size: 12, weight: .semibold)).foregroundStyle(Palette.ink)
                                 .padding(.horizontal, 12).frame(height: 28)
@@ -670,6 +671,21 @@ struct NotesWindowView: View {
 
     @ViewBuilder
     private var banner: some View {
+        // 语音和文字只发给你的服务, and nothing translates finished sentences: it picks up by itself, and
+        // no 改用 Ling, which would send the meeting elsewhere. A dead key or a missing local network
+        // permission is the user's to fix: those lines come first.
+        if live, model.translationHealth.googleOff, model.translationHealth.sentencesUntranslated,
+           engine.state != .invalidKey, !model.ling.aiCheck.localNetworkDenied {
+            let notesWait = [.unreachable, .updating].contains(engine.state) && model.ling.aiCheck.failure?.reason == .unreachable
+            StatusLine(tone: .waiting, text: notesWait ? L("译文和纪要等 \(serviceLabel) 恢复 · 字幕先显示原文")
+                                                       : L("译文等 \(serviceLabel) 恢复 · 字幕先显示原文"))
+        } else {
+            serviceBanner
+        }
+    }
+
+    @ViewBuilder
+    private var serviceBanner: some View {
         switch engine.state {
         case .noKey where session?.lines.isEmpty == false || live:
             keyEntry
@@ -713,16 +729,9 @@ struct NotesWindowView: View {
                 SoftButton(L("去设置"), dark: true) { model.openMicrophoneSettings() }
             }
         }
-        if model.roomPrompt {
-            ask(L("在会议室里开会？"), L("电脑里 1 分钟没放出声音")) {
-                SoftButton(L("改听会议室"), dark: true) { model.answerRoomPrompt(true) }
-                SoftButton(L("不是")) { model.answerRoomPrompt(false) }
-            }
-        }
-        if let app = model.onlinePrompt {
-            ask(L("线上也有人？"), L("\(app) 正在通话")) {
-                SoftButton(L("也听电脑"), dark: true) { model.answerOnlinePrompt(true) }
-                SoftButton(L("不用")) { model.answerOnlinePrompt(false) }
+        if model.roomMicSilent {
+            ask(L("麦克风没声音"), L("重开了一次也没好")) {
+                SoftButton(L("换麦克风"), dark: true) { model.openSoundInputSettings() }
             }
         }
     }

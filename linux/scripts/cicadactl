@@ -4,6 +4,7 @@
             target <code> | key-reload | windows | quit
             calls <program=name,…>|none|real | realcalls | endtimes <silence> <countdown> <grace>|off | endkeep
             notes-tab notes|transcript | notes-search <text> | notes-wide on|off | onboarding-step <n> | settings-scroll <0-1>
+            codecs | play [<seconds>] | pause | rate | playstate | settings-general (保存会议录音 and its player)
 Run it inside the Linux session (linux/vm/vmctl.sh ssh does that for the test VM)."""
 import os
 import socket

@@ -10,7 +10,7 @@ from datetime import datetime, timedelta, timezone
 
 from gi.repository import Gdk, Gio, GLib, Gtk, Pango
 
-from ..core import roommic, session_store, speakers
+from ..core import aac, roommic, session_store, speakers
 from ..core.strings import L, LF
 from ..core.support import SOURCES, TARGETS, Log, clock
 from . import ui
@@ -38,6 +38,10 @@ class RecordsWindow(Gtk.Window):
         self._both = False  # the shown meeting has lines I said (同声传译): rows name 你 / 对方
         self._nums, self._vnums, self._shown, self._speaker_key = {}, {}, {}, None  # 说话人识别 on show
         self._queued = False
+        self.player = None  # the shown record's recording (media.Player), while it has one to play
+        self._player_sid = None
+        self._dragging = False
+        self._hl_row = None  # the transcript row at the playhead
 
         bar = Gtk.HeaderBar()
         bar.set_show_close_button(True)
@@ -125,6 +129,8 @@ class RecordsWindow(Gtk.Window):
         self.connect("size-allocate", self._resized)
         self.connect("key-press-event", self._key)
         self._tick = GLib.timeout_add_seconds(1, self._clock)
+        # Closed: the recording stops; it is set up again when the window is next shown.
+        self.connect("hide", lambda *_: (self._unload_player(), setattr(self, "_built_key", None)))
         self.fill()
 
     def _key(self, _w, event) -> bool:
@@ -625,6 +631,7 @@ class RecordsWindow(Gtk.Window):
         d = self.content
         keep = self.right.get_vadjustment().get_value()
         if empty or no_match:
+            self._unload_player()
             ui.clear(d)
             self.top_box = None
             self.pinned.hide()
@@ -648,6 +655,7 @@ class RecordsWindow(Gtk.Window):
             return
         s = self.app.store.get(self.selected) if self.selected else None
         if s is None:
+            self._unload_player()
             ui.clear(d)
             self.top_box = None
             self.pinned.hide()
@@ -656,12 +664,26 @@ class RecordsWindow(Gtk.Window):
             d.show_all()
             return
         live = self.app.listen.listening and self.app.listen.session_id == s.id
-        key = (s.id, self.mode, live)
+        audio = self._audio_state(s, live)
+        key = (s.id, self.mode, live, audio)
         if getattr(self, "_built_key", None) == key and self.columns is not None:
             self._update_detail(s, live)
             return
         ui.clear(d)
         self._built_key = key
+        self._hl_row = None
+        if audio != "ready" or self._player_sid != s.id:
+            self._unload_player()
+        if audio == "ready" and self.player is None:
+            from . import media
+            try:
+                self.player = media.Player(self.app.store.audio_path(s.id), on_change=self._player_changed)
+                self._player_sid = s.id
+                GLib.timeout_add(250, self._poll, self.player)
+            except Exception as e:  # noqa: BLE001 - a file GStreamer can't open: no player, the record still shows
+                Log.d("records: can't play %s" % type(e).__name__)
+                self.player = None
+        self._playable = self.player is not None
 
         # Title, meta, actions
         top = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=16)
@@ -678,6 +700,9 @@ class RecordsWindow(Gtk.Window):
         top.pack_end(actions, False, False, 0)
         d.pack_start(top, False, False, 0)
         self.top_box = top
+        recording = self._audio_view(s, audio)
+        if recording is not None:
+            d.pack_start(ui.gap(recording, 14), False, False, 0)
 
         # Notes | transcript
         self.columns = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=40)
@@ -713,6 +738,11 @@ class RecordsWindow(Gtk.Window):
     def _update_detail(self, s, live) -> None:
         """The same meeting changed (a new line while listening, new notes, a rename): touch only what
         changed. Rebuilding a long transcript on every line froze the window for half a second."""
+        if self._audio_state(s, live) != self._built_key[3]:
+            # The recording was rewrapped (or went missing) since: the player bar and the time links change.
+            self._built_key = None
+            self.show_detail()
+            return
         if (not self._both and s.sourceFile is None and any(l.speaker == "me" for l in s.lines)) or \
                 self._speaker_state_key(s) != self._speaker_key:
             # My first sentence, or voices newly on show / renamed / merged: every row may now say
@@ -746,6 +776,169 @@ class RecordsWindow(Gtk.Window):
                 row.show_all()
                 self._rows[i] = (k, row)
         self._more_rows()
+
+    # The recording (保存会议录音)
+
+    def _audio_state(self, s, live):
+        """What shows under the title: "live" (it is being recorded), "ready" (a recording to play),
+        "missing" (the record says it has one, the file is gone), "none" (no recording), or None."""
+        from . import media
+        if live:
+            return "live" if self.app.listen.recording else None
+        path = self.app.store.audio_path(s.id)
+        if os.path.isfile(path):
+            # Without an AAC decoder (a record from a Mac on a stock computer) nothing true and
+            # useful can be said here: no bar.
+            return "ready" if media.can_play() else None
+        if os.path.isfile(aac.partial(path)):
+            return None  # being rewrapped into system.m4a: the bar comes a moment later
+        if s.hasAudio:
+            return "missing"
+        return "none" if s.lines else None
+
+    def _audio_view(self, s, audio):
+        if audio == "live":
+            return ui.text(L("会议结束后可以回放录音"), 12, "secondary")
+        if audio == "missing":
+            return ui.text(L("找不到录音，没法播放"), 12, "secondary")
+        if audio == "none":
+            if not self.app.can_record:
+                # 保存会议录音 can't be turned on here (no AAC encoder): no link to a greyed-out switch.
+                return ui.text(L("这场会议没存录音 ·").rstrip(" ·"), 12, "secondary", wrap=False)
+            line = ui.hbox(4, ui.text(L("这场会议没存录音 ·"), 12, "secondary", wrap=False, ellipsize=False))
+            go = Gtk.Button()
+            go.add(ui.text(L("保存会议录音"), 12, "link", wrap=False, ellipsize=False))
+            go.set_relief(Gtk.ReliefStyle.NONE)
+            ui.classes(go, "timelink")
+            go.connect("clicked", lambda *_: self.app.show_settings(general=True))
+            line.pack_start(go, False, False, 0)
+            return line
+        if audio == "ready" and self.player is not None:
+            return self._player_bar()
+        return None
+
+    def _player_bar(self) -> Gtk.Widget:
+        """Play / pause, where in the meeting, and the speed (RecordingPlayerBar), in a soft box."""
+        p = self.player
+        self._pb_icon = ui.icon("media-playback-start-symbolic", 13)
+        play = Gtk.Button()
+        play.add(self._pb_icon)
+        ui.classes(play, "playround")
+        play.set_valign(Gtk.Align.CENTER)
+        play.connect("clicked", lambda *_: self.player is not None and self.player.toggle())
+        self._pb_play = play
+        self._pb_time = ui.classes(ui.text(clock(0), 12, "secondary", wrap=False, ellipsize=False), "tnum")
+        self._pb_len = ui.classes(ui.text(clock(p.length), 12, "secondary", wrap=False, ellipsize=False), "tnum")
+        scale = Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, 0, max(p.length, 1), 0.1)
+        scale.set_draw_value(False)
+        scale.set_valign(Gtk.Align.CENTER)
+        ui.classes(scale, "playerscale")
+        scale.connect("button-press-event", lambda *_: setattr(self, "_dragging", True) or False)
+
+        def released(w, _e):
+            self._dragging = False
+            if self.player is not None:
+                self.player.seek(w.get_value())
+            return False
+        scale.connect("button-release-event", released)
+
+        def moved(_w, _scroll, value):
+            ui.retext(self._pb_time, clock(max(0, value)))
+            if not self._dragging and self.player is not None:
+                self.player.seek(value)  # the keyboard
+            return False
+        scale.connect("change-value", moved)
+        self._pb_scale = scale
+        rate = Gtk.Button()
+        self._pb_rate = ui.text("1×", 11, "secondary", bold=True, wrap=False, ellipsize=False)
+        rate.add(self._pb_rate)
+        ui.classes(rate, "ratebtn")
+        rate.set_valign(Gtk.Align.CENTER)
+        rate.set_tooltip_text(L("播放速度"))
+        rate.connect("clicked", lambda *_: self.player is not None and self.player.next_rate())
+        row = ui.hbox(12, play, self._pb_time)
+        row.pack_start(scale, True, True, 0)
+        row.pack_start(self._pb_len, False, False, 0)
+        row.pack_start(rate, False, False, 0)
+        self._player_changed()
+        return ui.panel(ui.pad(row, 8, 14, 8, 10), "playerbar")
+
+    def _player_changed(self) -> None:
+        p = self.player
+        if p is None or getattr(self, "_pb_play", None) is None:
+            return
+        self._pb_icon.set_from_icon_name("media-playback-pause-symbolic" if p.playing else "media-playback-start-symbolic",
+                                         Gtk.IconSize.BUTTON)
+        tip = L("暂停") if p.playing else L("播放")
+        self._pb_play.set_tooltip_text(tip)
+        self._pb_play.get_accessible().set_name(tip)
+        ui.retext(self._pb_rate, {1.0: "1×", 1.5: "1.5×"}.get(p.rate, "2×"))
+
+    def _unload_player(self) -> None:
+        if self.player is not None:
+            self.player.close()
+        self.player = None
+        self._player_sid = None
+        self._pb_play = None
+        self._hl_row = None
+
+    def _poll(self, player) -> bool:
+        """Four times a second while a recording is loaded: the time, the bar, and the line being played."""
+        if player is not self.player:
+            return False
+        if getattr(self, "_pb_play", None) is None or not self.get_visible():
+            return True
+        t, length = player.time, player.length
+        ui.retext(self._pb_len, clock(length))
+        if self._pb_scale.get_adjustment().get_upper() != max(length, 1):
+            self._pb_scale.set_range(0, max(length, 1))
+        if not self._dragging:
+            ui.retext(self._pb_time, clock(t))
+            self._pb_scale.set_value(min(t, max(length, 1)))
+        self._player_changed()
+        if player.started:
+            self._highlight(t, follow=player.playing)
+        return True
+
+    def _highlight(self, now: float, follow: bool) -> None:
+        """The last line that began by now (a little ahead, so it lights as it starts) in the accent;
+        while playing, scrolled into view when it isn't."""
+        s = self.app.store.get(self._player_sid) if self._player_sid else None
+        if s is None:
+            return
+        idx = -1
+        for i, l in enumerate(s.lines):
+            if l.t <= now + 0.2:
+                idx = i
+            else:
+                break
+        row = self._rows[idx][1] if 0 <= idx < len(self._rows) else None
+        if row is self._hl_row:
+            return
+        old, self._hl_row = self._hl_row, row
+        for r, on in ((old, False), (row, True)):
+            if r is None or r.get_parent() is None:  # a row rebuilt since (its line changed) is gone
+                continue
+            ctx = r.get_style_context()
+            ctx.add_class("playing") if on else ctx.remove_class("playing")
+            label = r.time_label
+            label.get_style_context().remove_class("link" if on else "accent")
+            label.get_style_context().add_class("accent" if on else "link")
+            size, lang, _bold = label.cicada_format
+            label.cicada_format = (size, lang, on)
+            ui.retext(label, label.get_text())
+        if row is not None and follow:
+            self._reveal(row)
+
+    def _reveal(self, row) -> None:
+        pos = row.translate_coordinates(self.content, 0, 0)
+        if pos is None:
+            return
+        adj = self.right.get_vadjustment()
+        y, h = pos[1], row.get_allocated_height()
+        top = adj.get_value() + (self.pinned.get_allocated_height() if self.pinned.get_visible() else 0)
+        if y < top or y + h > adj.get_value() + adj.get_page_size():
+            adj.set_value(max(0, min(y - adj.get_page_size() / 3, adj.get_upper() - adj.get_page_size())))
 
     def _more_menu(self, s) -> Gtk.MenuButton:
         """The record as it is when pressed: 恢复自动标题 only for a renamed meeting the notes have
@@ -1048,9 +1241,19 @@ class RecordsWindow(Gtk.Window):
         row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
         t = ui.text(clock(l.t), 11, "link", wrap=False, ellipsize=False)  # times in the logo's orange ink
         t.set_size_request(44, -1)
-        t.set_valign(Gtk.Align.START)
-        t.set_margin_top(2)
-        row.pack_start(t, False, False, 0)
+        time_widget = t
+        if getattr(self, "_playable", False):
+            # With a recording, a time plays from that line (the Mac's line times).
+            time_widget = Gtk.Button()
+            time_widget.add(t)
+            time_widget.set_relief(Gtk.ReliefStyle.NONE)
+            ui.classes(time_widget, "timelink")
+            time_widget.set_tooltip_text(L("播放"))
+            time_widget.connect("clicked", lambda *_: self.player is not None and self.player.play_from(l.t))
+        time_widget.set_valign(Gtk.Align.START)
+        time_widget.set_halign(Gtk.Align.START)
+        time_widget.set_margin_top(2)
+        row.pack_start(time_widget, False, False, 0)
         texts = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
         # Whose it is, where the speaker changes (as chat apps do): with voices told apart, or in a
         # meeting I spoke in through 同声传译.
@@ -1066,7 +1269,9 @@ class RecordsWindow(Gtk.Window):
             texts.pack_start(ui.text(l.src, 12, "tertiary", selectable=True, width_chars=46, lang=l.srcLang), False, False, 0)
         row.pack_start(texts, True, True, 0)
         ui.pad(row, 9, 0, 9, 0)
-        return self._row_key(l, start), ui.panel(row, "transcript-row")
+        panel = ui.panel(row, "transcript-row")
+        panel.time_label = t
+        return self._row_key(l, start), panel
 
     def _starts(self, lines) -> set:
         """Lines whose speaker label shows: a change of speaker, or in 电脑和会议室 of place too."""

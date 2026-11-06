@@ -26,6 +26,9 @@ class AppSettings:
         # The custom service's hear model at an address of its own (the port's, like the Mac's
         # aiCustomHearBase); empty: the same address as the text model.
         "aiCustomHearBase": "",
+        # 语音和文字只发给你的服务 (the Mac's aiCustomOnly): with the custom service, Google Translate is
+        # never asked. Kept when another service is picked, but only acts on the custom one.
+        "aiCustomOnly": False,
         "view": "notes",             # "notes" (the notes window, default) or "subtitles" (the subtitle bar)
         "showInCapture": False,      # 共享屏幕时让对方看到 (Linux can't hide it; see NotesWindow)
         "onboarded": False,
@@ -36,15 +39,17 @@ class AppSettings:
         "trayHintShown": False,      # 知了还在顶栏, said once after the records window is first closed
         "uiLanguage": "system",      # "system", "zh-Hans", "en", "ja" or "ko"
         # 同声传译: what I say is interpreted and spoken into 知了 麦克风 (the Mac's speakEnabled etc.).
+        # 保存会议录音 (the Mac's recordAudio): system.m4a beside session.json, when GStreamer has an AAC encoder.
+        "recordAudio": True,
         "speakerVoices": True,       # 说话人识别: tell the other side's voices apart (说话人 1、2…), as on the Mac
         "speakEnabled": False,
         "speakFrom": "system",       # the language I speak; "system" = the subtitles' language
         "speakTo": "room",           # what the room hears; "room" = the language they have been speaking
         "speakVoices": {},           # Ming voice per language key ("en": "US_Emma")
         "speakHeadphones": False,    # 戴着耳机: skip the echo guard, talking over them is fine
-        # 听哪里 (the Mac's listenSource): "system" (what the computer plays), "room" (a real
-        # microphone, for a meeting in the room) or "both" (电脑和会议室: people online and in the
-        # room, each heard on its own); roomMic: the room's microphone, "" = 自动.
+        # 打开麦克风 (the Mac's listenSource): "both" while the mic is on (people online and in the
+        # room, each heard on its own), else "system"; never kept for the next launch. roomMic: the
+        # room's microphone, "" = 自动.
         "listenSource": "system",
         "roomMic": "",
         # 结束会议 (meeting_end.py), the Mac's keys: end when the meeting app hangs up; when nobody
@@ -82,6 +87,11 @@ class AppSettings:
         return meeting if (choice or self.notesLanguage) == "source" and meeting else self.target_code
 
     @property
+    def google_off(self) -> bool:
+        """语音和文字只发给你的服务 in effect: on, and the custom service in use."""
+        return self.aiProvider == "custom" and self.aiCustomOnly
+
+    @property
     def hears_room(self) -> bool:
         """The room microphone is open: 会议室 or 电脑和会议室."""
         return self.listenSource != "system"
@@ -116,8 +126,8 @@ class AppSettings:
                     # 纪要语言 was "system" or a language code before it took the Mac's two choices.
                     if kw.get("notesLanguage") not in (None, "mine", "source"):
                         kw["notesLanguage"] = "mine"
-                    if kw.get("listenSource") not in (None,) + AppSettings.SOURCES:
-                        kw["listenSource"] = "system"
+                    # Every launch starts with the microphone off.
+                    kw.pop("listenSource", None)
                     return AppSettings(**kw)
         except OSError as e:
             Log.d("settings: unreadable, defaults used (%s)" % type(e).__name__)

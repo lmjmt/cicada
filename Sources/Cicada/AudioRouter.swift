@@ -78,6 +78,9 @@ final class AudioRouter: @unchecked Sendable {
 
     private var recordURL: URL?
     private var recorder: AVAudioFile?
+    /// The recording keeps the meeting's clock (the lines' times): when it began and what is written.
+    private var recordStart: Date?
+    private var recordedFrames: AVAudioFramePosition = 0
 
     /// When a block counts as speech (pauses, language detection, the silence that ends a meeting).
     func setRoomGate(_ on: Bool) {
@@ -130,6 +133,8 @@ final class AudioRouter: @unchecked Sendable {
         queue.sync {
             recorder = nil // closes the previous file
             recordURL = url
+            recordStart = url == nil ? nil : Date()
+            recordedFrames = 0
         }
     }
 
@@ -139,7 +144,32 @@ final class AudioRouter: @unchecked Sendable {
             recorder = AudioFileWriter.open(AudioFileWriter.partial(url), format: buffer.format)
             if recorder == nil { recordURL = nil; return }
         }
+        // A process tap sends nothing while the Mac is silent: the gap goes in as silence, or every
+        // later line's time would point past its words in the recording.
+        if let recordStart {
+            let rate = buffer.format.sampleRate
+            let due = (Date().timeIntervalSince(recordStart) * rate).rounded() - Double(buffer.frameLength)
+            let behind = due - Double(recordedFrames)
+            if behind > rate / 4 { writeSilence(AVAudioFramePosition(behind), format: buffer.format) }
+        }
         try? recorder?.write(from: buffer)
+        recordedFrames += AVAudioFramePosition(buffer.frameLength)
+    }
+
+    private func writeSilence(_ frames: AVAudioFramePosition, format: AVAudioFormat) {
+        let chunk = AVAudioFrameCount(format.sampleRate)
+        guard let zeros = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: chunk) else { return }
+        zeros.frameLength = chunk // sizes the buffers to the whole capacity before they are cleared
+        for b in UnsafeMutableAudioBufferListPointer(zeros.mutableAudioBufferList) {
+            if let data = b.mData { memset(data, 0, Int(b.mDataByteSize)) }
+        }
+        var left = frames
+        while left > 0 {
+            zeros.frameLength = AVAudioFrameCount(min(left, AVAudioFramePosition(chunk)))
+            guard (try? recorder?.write(from: zeros)) != nil else { return }
+            recordedFrames += AVAudioFramePosition(zeros.frameLength)
+            left -= AVAudioFramePosition(zeros.frameLength)
+        }
     }
 
     /// Seconds of audio given to the current analyzer, replay included: the analyzer's clock. A

@@ -103,10 +103,10 @@ switch (args_[0])
         Console.WriteLine($"{provider}: hear {ling.Config.HearModel}, text {ling.Config.TextModel}");
         var store = new SessionStore();
         var notes = new NotesEngine(ling, store);
-        var engine = new ListenEngine(ling, new Translator(ling), store, notes, settings);
+        var engine = new ListenEngine(ling, new Translator(ling) { GoogleOff = settings.GoogleOff }, store, notes, settings);
         var roomFile = Opt("--room", "");
         var roomOnly = args_.Contains("--room-only");
-        var roomEngine = roomFile.Length > 0 && !roomOnly ? new ListenEngine(ling, new Translator(ling), store, notes, settings, roomSide: true) : null;
+        var roomEngine = roomFile.Length > 0 && !roomOnly ? new ListenEngine(ling, new Translator(ling) { GoogleOff = settings.GoogleOff }, store, notes, settings, roomSide: true) : null;
 
         var printed = new HashSet<string>();
         var shown = new Dictionary<string, string>();

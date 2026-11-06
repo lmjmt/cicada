@@ -118,11 +118,12 @@ sealed class MainWindow : Window
         Content = Ui.Frameless(this, grid);
         // The pill's clock and level move while listening; nothing else needs a timer.
         tick.Tick += (_, _) => { if (app.Listen.Listening) Pill(); else { tick.Stop(); Pill(); } };
-        Closed += (_, _) => tick.Stop();
+        Closed += (_, _) => { tick.Stop(); ClosePlayer(); };
+        playTick.Tick += (_, _) => UpdatePlayer();
         Refresh();
     }
 
-    public void Select(string id) { selected = id; tab = "notes"; shownKey = null; Fill(); }
+    public void Select(string id, string page = "notes") { selected = id; tab = page; shownKey = null; Fill(); }
 
     public void Refresh()
     {
@@ -387,7 +388,7 @@ sealed class MainWindow : Window
 
     /// What the open page shows; a store change that leaves it the same doesn't redraw it.
     string? PageKey() => selected is not null && app.Store.Get(selected) is { } cur
-        ? $"{selected}|{tab}|{SessionStore.DisplayTitle(cur)}|{cur.Lines.Count}|{cur.Notes?.Covered}|{cur.Notes?.Final}|{app.Listen.Listening}|{app.Notes.GeneratingId == selected}"
+        ? $"{selected}|{tab}|{SessionStore.DisplayTitle(cur)}|{cur.Lines.Count}|{cur.Notes?.Covered}|{cur.Notes?.Final}|{app.Listen.Listening}|{app.Notes.GeneratingId == selected}|{cur.HasAudio}|{Recording.Playable(cur)}|{app.Settings.RecordAudio}"
         : null;
 
     void ShowDetail()
@@ -420,6 +421,7 @@ sealed class MainWindow : Window
             titleRow.Children.Add(reset);
         }
         top.Children.Add(titleRow);
+        if (PlayerArea(s, live) is { } audio) top.Children.Add(audio);
 
         // 纪要 / 文字记录 on the left, what to do with it on the right, one hairline under both.
         FrameworkElement Tabs(double size) => Ui.Tabs([("notes", L("纪要")), ("transcript", s.Lines.Count > 0 ? $"{L("文字记录")} {s.Lines.Count}" : L("文字记录"))], tab, t => { tab = t; ShowDetail(); }, size);
@@ -437,6 +439,7 @@ sealed class MainWindow : Window
         body.Margin = new Thickness(0, 28, 0, 0);
         page.Children.Add(body);
         var scroll = new ScrollViewer { VerticalScrollBarVisibility = ScrollBarVisibility.Auto, Content = page };
+        pageScroll = scroll;
 
         // Once the title block scrolls away, a slim bar on top keeps the title (a click goes back
         // up), the tabs and the tools in view: the Mac's pinned bar.
@@ -604,12 +607,15 @@ sealed class MainWindow : Window
     {
         var body = new StackPanel();
         FrameworkElement? target = null;
+        rows.Clear(); lit = -1;
+        Action<double>? play = player is not null ? PlayFrom : null;
         // The line nearest the topic's time (older notes may hold a time no line has).
         var nearest = jumpTo is { } t0 && s.Lines.Count > 0 ? s.Lines.MinBy(l => Math.Abs(l.T - t0)) : null;
         foreach (var (l, who, ink, place) in NotesWindow.Speakers(s.Lines, app.Settings.SpeakerVoices))
         {
-            var line = NotesWindow.TranscriptRow(l, who, ink, place);
+            var line = NotesWindow.TranscriptRow(l, who, ink, place, play);
             if (ReferenceEquals(l, nearest)) target = line;
+            if (play is not null && line is Panel row0 && FindTime(row0) is { } time) rows.Add((l.T, row0, time));
             body.Children.Add(line);
         }
         if (target is Panel row)
@@ -632,7 +638,266 @@ sealed class MainWindow : Window
             fade.Start();
         }
         jumpTo = null;
+        if (player is not null) Dispatcher.BeginInvoke(UpdatePlayer, DispatcherPriority.Loaded);
         return body;
+    }
+
+    static TextBlock? FindTime(Panel row) =>
+        row.Children.OfType<Panel>().FirstOrDefault()?.Children.OfType<TextBlock>().FirstOrDefault(t => (t.Tag as string) == "time");
+
+    // MARK: 回放
+
+    // One player for the open record, kept while the page redraws (lines and notes arriving) and
+    // closed when another record opens, the record is deleted or the window closes.
+    MediaPlayer? player;
+    string? playerPath;
+    bool playing, opened;
+    double speed = 1;
+    double? pendingSeek;
+    readonly DispatcherTimer playTick = new() { Interval = TimeSpan.FromMilliseconds(200) };
+    ScrollViewer? pageScroll;
+    // The transcript's lines with their times, in time order, and the one at the playhead.
+    readonly List<(double t, Panel row, TextBlock time)> rows = [];
+    int lit = -1;
+    // The bar's moving parts, rebuilt with the page.
+    TextBlock? nowText, lengthText, speedText;
+    Border? played;
+    FrameworkElement? thumb;
+    Grid? track;
+    Button? playButton;
+    double fallbackLength;
+
+    /// Under the title: the player for a recording; while live, that it plays afterwards; else
+    /// why there is none (and where to turn recording on).
+    FrameworkElement? PlayerArea(Session s, bool live)
+    {
+        FrameworkElement Note(FrameworkElement e) { e.Margin = new Thickness(0, 12, 0, 0); return e; }
+        if (live)
+        {
+            ClosePlayer();
+            return app.Settings.RecordAudio ? Note(Ui.Text(L("会议结束后可以回放录音"), 12, Palette.Secondary)) : null;
+        }
+        var path = Recording.Playable(s);
+        if (path is null)
+        {
+            ClosePlayer();
+            // Just ended: system.aac is being rewrapped into system.m4a, a moment.
+            if (File.Exists(Recording.Partial(Recording.SystemAudio(s.Id)))) return null;
+            if (s.HasAudio || s.SourcePath is not null) return Note(Ui.Text(L("找不到录音，没法播放"), 12, Palette.Secondary));
+            if (s.Lines.Count == 0) return null;
+            var link = Ui.LinkText(L("保存会议录音"), () => { app.ShowSettings(); app.SettingsPage("privacy"); }, 12);
+            return Note(Ui.Row(4, Ui.Text(L("这场会议没存录音 ·"), 12, Palette.Secondary, wrap: false), link));
+        }
+        if (playerPath != path)
+        {
+            ClosePlayer();
+            playerPath = path;
+            opened = false;
+            player = new MediaPlayer();
+            player.MediaOpened += (_, _) =>
+            {
+                opened = true;
+                if (!playing) player!.Pause(); // MediaPlayer starts playing by itself once opened
+                if (pendingSeek is { } t) { pendingSeek = null; player!.Position = TimeSpan.FromSeconds(t); }
+                UpdatePlayer();
+            };
+            player.MediaEnded += (_, _) => Ended();
+            player.MediaFailed += (_, e) => Log.Debug($"player: failed {e.ErrorException?.GetType().Name} 0x{e.ErrorException?.HResult:X8}");
+            player.Open(new Uri(path));
+            player.Pause();
+            player.SpeedRatio = speed;
+        }
+        fallbackLength = s.Duration.TotalSeconds;
+        return Note(PlayerBar());
+    }
+
+    FrameworkElement PlayerBar()
+    {
+        playButton = Capsule(Ui.Icon(playing ? Icons.Pause : Icons.Play, 14, Brushes.White, fill: true), Palette.Ink, null, 36, new Thickness(0), TogglePlay, playing ? L("暂停") : L("播放"));
+        playButton.Width = 36;
+        playButton.ToolTip = playing ? L("暂停") : L("播放");
+        nowText = Clock("00:00");
+        lengthText = Clock(Languages.Clock(fallbackLength));
+        speedText = Ui.Text(SpeedLabel(), 12, Palette.Body, Palette.Strong, wrap: false);
+        var speedButton = Capsule(speedText, Palette.Surface, Palette.Line, 26, new Thickness(9, 0, 9, 0), CycleSpeed, L("播放速度"));
+        speedButton.ToolTip = L("播放速度");
+
+        // The slider: a grey rail, the played part in the accent, a round handle; click or drag.
+        var rail = new Border { Height = 4, CornerRadius = new CornerRadius(2), Background = Palette.Line, VerticalAlignment = VerticalAlignment.Center };
+        played = new Border { Height = 4, CornerRadius = new CornerRadius(2), Background = Palette.Live, VerticalAlignment = VerticalAlignment.Center, HorizontalAlignment = HorizontalAlignment.Left, Width = 0 };
+        thumb = new System.Windows.Shapes.Ellipse { Width = 12, Height = 12, Fill = Palette.Live, Stroke = Brushes.White, StrokeThickness = 2, VerticalAlignment = VerticalAlignment.Center, HorizontalAlignment = HorizontalAlignment.Left };
+        track = new Grid { Height = 24, Background = Brushes.Transparent, Cursor = System.Windows.Input.Cursors.Hand, Margin = new Thickness(12, 0, 12, 0), Children = { rail, played, thumb } };
+        System.Windows.Automation.AutomationProperties.SetName(track, L("播放"));
+        void SeekTo(System.Windows.Input.MouseEventArgs e)
+        {
+            if (track.ActualWidth <= 0) return;
+            var f = Math.Clamp(e.GetPosition(track).X / track.ActualWidth, 0, 1);
+            Seek(f * Length());
+        }
+        track.MouseLeftButtonDown += (_, e) => { track.CaptureMouse(); SeekTo(e); e.Handled = true; };
+        track.MouseMove += (_, e) => { if (track.IsMouseCaptured) SeekTo(e); };
+        track.MouseLeftButtonUp += (_, _) => track.ReleaseMouseCapture();
+        track.SizeChanged += (_, _) => UpdatePlayer();
+
+        var bar = new DockPanel { LastChildFill = true };
+        foreach (var (e, dock, left) in new (FrameworkElement, Dock, double)[] { (playButton, Dock.Left, 0), (nowText, Dock.Left, 12), (speedButton, Dock.Right, 12), (lengthText, Dock.Right, 0) })
+        {
+            e.VerticalAlignment = VerticalAlignment.Center;
+            e.Margin = new Thickness(left, 0, 0, 0);
+            DockPanel.SetDock(e, dock);
+            bar.Children.Add(e);
+        }
+        bar.Children.Add(track);
+        Dispatcher.BeginInvoke(UpdatePlayer, DispatcherPriority.Loaded);
+        return new Border
+        {
+            Background = Palette.PlayerFill, BorderBrush = Palette.Line, BorderThickness = new Thickness(1), CornerRadius = new CornerRadius(12),
+            Padding = new Thickness(8, 8, 10, 8), Child = bar,
+        };
+
+        static TextBlock Clock(string text)
+        {
+            var t = Ui.Text(text, 12, Palette.Secondary, wrap: false);
+            System.Windows.Documents.Typography.SetNumeralAlignment(t, FontNumeralAlignment.Tabular);
+            return t;
+        }
+    }
+
+    string SpeedLabel() => speed == 1 ? "1×" : speed == 1.5 ? "1.5×" : "2×";
+
+    double Length() => player is { NaturalDuration.HasTimeSpan: true } p ? p.NaturalDuration.TimeSpan.TotalSeconds : fallbackLength;
+
+    double Now() => pendingSeek ?? player?.Position.TotalSeconds ?? 0;
+
+    void TogglePlay()
+    {
+        if (player is null) return;
+        if (playing) { player.Pause(); playing = false; playTick.Stop(); }
+        else { player.Play(); playing = true; playTick.Start(); }
+        Log.Debug($"player: {(playing ? "play" : "pause")} at {Now():F1}");
+        UpdatePlayer(reveal: playing);
+    }
+
+    /// A line's time: play from there.
+    void PlayFrom(double t)
+    {
+        if (player is null) return;
+        Seek(t);
+        player.Play();
+        playing = true;
+        playTick.Start();
+        Log.Debug($"player: play from {t:F1}");
+        UpdatePlayer(reveal: true);
+    }
+
+    void Seek(double t)
+    {
+        if (player is null) return;
+        t = Math.Clamp(t, 0, Math.Max(0, Length()));
+        if (opened) player.Position = TimeSpan.FromSeconds(t); else pendingSeek = t;
+        UpdatePlayer();
+    }
+
+    /// Played to the end: back to the start, paused.
+    void Ended()
+    {
+        if (player is null) return;
+        player.Pause();
+        player.Position = TimeSpan.Zero;
+        playing = false;
+        playTick.Stop();
+        UpdatePlayer();
+    }
+
+    void CycleSpeed()
+    {
+        speed = speed == 1 ? 1.5 : speed == 1.5 ? 2 : 1;
+        if (player is not null) player.SpeedRatio = speed;
+        if (speedText is not null) speedText.Text = SpeedLabel();
+    }
+
+    /// The bar and the lit line follow the playhead (every 200 ms while playing).
+    void UpdatePlayer() => UpdatePlayer(false);
+
+    /// `reveal`: playing just started, so the lit line is scrolled to even if it was lit already.
+    void UpdatePlayer(bool reveal)
+    {
+        if (player is null) return;
+        var now = Now();
+        var length = Length();
+        // MediaEnded doesn't always come (a PC with no sound device plays on past the end).
+        if (playing && opened && length > 0 && now >= length) { Ended(); return; }
+        if (nowText is not null) nowText.Text = Languages.Clock(now);
+        if (lengthText is not null) lengthText.Text = Languages.Clock(length);
+        if (playButton is not null)
+        {
+            var icon = playing ? Icons.Pause : Icons.Play;
+            if (playButton.Tag as string != icon)
+            {
+                playButton.Tag = icon;
+                playButton.Content = Ui.Icon(icon, 14, Brushes.White, fill: true);
+                playButton.ToolTip = playing ? L("暂停") : L("播放");
+                System.Windows.Automation.AutomationProperties.SetName(playButton, playing ? L("暂停") : L("播放"));
+            }
+        }
+        if (track is not null && played is not null && thumb is not null && track.ActualWidth > 0)
+        {
+            var x = track.ActualWidth * (length > 0 ? Math.Clamp(now / length, 0, 1) : 0);
+            played.Width = x;
+            thumb.Margin = new Thickness(Math.Max(0, Math.Min(track.ActualWidth - thumb.Width, x - thumb.Width / 2)), 0, 0, 0);
+        }
+        // The line being said: the last one starting by now (a little ahead, so it lights as it begins).
+        var at = playing || now > 0 ? rows.FindLastIndex(r => r.t <= now + 0.2) : -1;
+        if (at == lit)
+        {
+            if (reveal && playing && lit >= 0) KeepInView(rows[lit].row);
+            return;
+        }
+        if (lit >= 0 && lit < rows.Count)
+        {
+            var (_, row, time) = rows[lit];
+            row.Background = Brushes.Transparent;
+            time.Foreground = Palette.TimeLink; time.FontWeight = FontWeights.Normal;
+        }
+        lit = at;
+        if (lit < 0) return;
+        var (_, r, t) = rows[lit];
+        r.Background = Palette.Playing;
+        t.Foreground = Palette.Live; t.FontWeight = FontWeights.SemiBold;
+        if (playing) KeepInView(r);
+    }
+
+    /// Scrolls the lit line back into view when it leaves it (above, under the pinned bar, or below).
+    void KeepInView(FrameworkElement row)
+    {
+        if (pageScroll is not { } scroll || !row.IsLoaded) return;
+        var y = row.TransformToAncestor(scroll).Transform(new Point(0, 0)).Y;
+        if (y >= 110 && y + row.ActualHeight <= scroll.ViewportHeight - 24) return;
+        scroll.ScrollToVerticalOffset(Math.Max(0, scroll.VerticalOffset + y - scroll.ViewportHeight * 0.35));
+    }
+
+    void ClosePlayer()
+    {
+        playTick.Stop();
+        playing = false;
+        pendingSeek = null;
+        if (player is not null)
+        {
+            player.Stop();
+            player.Close();
+            player = null;
+        }
+        playerPath = null;
+        lit = -1;
+    }
+
+    /// For the debug pipe: where playback is.
+    public string PlayerState() => player is null ? "none" : $"{(playing ? "playing" : "paused")} {Now():F1}/{Length():F1} x{speed} line {lit}";
+    public void DebugPlay(string arg)
+    {
+        if (arg == "toggle") TogglePlay();
+        else if (arg == "speed") CycleSpeed();
+        else if (double.TryParse(arg, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var t)) PlayFrom(t);
     }
 
     static FrameworkElement Gap(FrameworkElement e, double top) { e.Margin = new Thickness(0, top, 0, 0); return e; }
@@ -669,6 +934,9 @@ sealed class MainWindow : Window
     void Delete(Session s)
     {
         if (Dialogs.Confirm(this, L("删除这次会议？"), LF("“%@”的纪要和文字记录都会删掉，没法恢复。", SessionStore.DisplayTitle(s)), L("删除"), danger: true))
+        {
+            ClosePlayer(); // it holds the recording open
             app.Store.Delete(s.Id);
+        }
     }
 }

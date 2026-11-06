@@ -181,13 +181,37 @@ class AiServiceActivity : Activity() {
         hearSection(app, c, opened, rows)
         voiceSection(app, c, opened, rows)
         page.addView(ui.group(rows))
+        page.addView(ui.group(listOf(onlyRow(app))).apply {
+            layoutParams = LinearLayout.LayoutParams(-1, -2).apply { topMargin = ui.dp(16) }
+        })
         val host = c.base?.let { Uri.parse(it).host } ?: L("你填的地址")
         page.addView(ui.helper(LF("加密存在这台手机上，只发给 %@", host)).apply { setPadding(ui.dp(16), ui.dp(8), ui.dp(16), 0) })
         // Never "按所选模型计费" here: the user runs it, or their provider bills it its own way.
         val nearby = c.base?.let(Providers::isNearby) ?: false
         val foot = (if (nearby) L("跑在你自己的机器上，不按量计费。") else L("费用以这个服务为准。")) +
-            LF("听的时候，声音会发给 %@。", ling.hearHost.ifEmpty { host })
+            if (app.settings.aiCustomOnly) LF("会议的语音和文字只发给 %@，不经过 Google 等外部服务。", customHosts(c))
+            else LF("听的时候，声音会发给 %@。", ling.hearHost.ifEmpty { host })
         page.addView(ui.helper(foot).apply { setPadding(ui.dp(16), ui.dp(12), ui.dp(16), 0) })
+    }
+
+    /// 语音和文字只发给你的服务 (AISettings.swift › onlyRow): Google is never asked. The grey line says
+    /// what it costs, and while the service can't be reached, that new subtitles are the original
+    /// only (a phone has no on-device translation to stand in).
+    private fun onlyRow(app: CicadaApp): View {
+        val on = app.settings.aiCustomOnly
+        val check = app.ling.aiCheck
+        val failure = check.failure
+        val down = on && app.ling.hasKey && !check.running && failure != null && failure.reason != AICheck.Reason.Busy
+        val detail = if (down) L("现在连不上：新字幕暂时只有原文") else L("不用 Google 翻译；说话时要等整句说完才出译文")
+        return ui.switchRow(L("语音和文字只发给你的服务"), detail, on) { app.setCustomOnly(it) }
+    }
+
+    /// Where the custom service's audio and text go: one host when every use shares it. On a phone
+    /// the hear model always listens, so its address always counts.
+    private fun customHosts(c: AIConfig): String {
+        val hosts = listOfNotNull(c.base, c.hearBase, c.voiceBase?.takeIf { c.hasVoices })
+            .map { Uri.parse(it).host }.toSet()
+        return hosts.singleOrNull() ?: L("你填的地址")
     }
 
     /// A row that opens to its fields: a state dot, the use, what it runs on, and how it's doing.
@@ -265,7 +289,7 @@ class AiServiceActivity : Activity() {
             ui.listRow(if (check.running) L("正在检查…") else L("重新检查"), null,
                 leading = ui.icon(R.drawable.i_restore, 22, if (check.running) Palette.tertiary else Palette.body), chevron = false,
                 onClick = if (check.running || k == null) null else ({ app.recheck() })),
-            check.slowLine()?.let { note(it, AiCheckViews.warn) },
+            check.slowLine(app.translator.googleOff)?.let { note(it, AiCheckViews.warn) },
             if (steps) AiCheckViews.steps(this, ui, recheck = false) { editKey(this, ui) } else null,
             facts?.let { note(it, Palette.tertiary) },
         ))

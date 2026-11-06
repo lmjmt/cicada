@@ -221,10 +221,15 @@ struct AICheck: Equatable {
         }
     }
 
-    /// Why translations are slow, and what to do (a custom service).
-    func slowLine() -> String? {
+    /// Why translations are slow, and what to do (a custom service). `googleOff`: 语音和文字只发给你的
+    /// 服务 is on, so a sentence that takes too long isn't handed to Google.
+    func slowLine(googleOff: Bool = false) -> String? {
         guard slow, let t = translate else { return nil }
         let secs = String(format: "%.1f", t.seconds)
+        if googleOff {
+            return t.thinks ? L("这个模型先思考再回答，翻一句要 \(secs) 秒，超过 6 秒这句就不等它了。在服务端关掉思考，或换一个不思考的模型。")
+                : L("翻一句要 \(secs) 秒，超过 6 秒这句就不等它了。换一个更小的模型会快一些。")
+        }
         return t.thinks ? L("这个模型先思考再回答，翻一句要 \(secs) 秒，超过 6 秒会改用 Google。在服务端关掉思考，或换一个不思考的模型。")
             : L("翻一句要 \(secs) 秒，超过 6 秒会改用 Google。换一个更小的模型会快一些。")
     }

@@ -123,10 +123,16 @@ public sealed class SpeakEngine
     }
 
     DateTimeOffset? pressedAt;
+    double? pressedMono;
+    /// When the computer's audio was loud, while listening (the echo check); null when not listening.
+    public LoudnessLog? Echo { get; set; }
+    /// Share of the press the computer may play through before it counts as echo (Linux's 0.5).
+    public const double EchoShare = 0.5;
 
     public void BeginRecording()
     {
         pressedAt = DateTimeOffset.Now;
+        pressedMono = Echo?.Now;
         State = Phase.Recording; Said = Heard = Problem = null;
         Changed?.Invoke();
     }
@@ -143,6 +149,21 @@ public sealed class SpeakEngine
         try
         {
             var released = DateTime.UtcNow;
+            // A press nobody spoke in: Ming hears 嗯 in the room's hush and the meeting would hear "Hmm."
+            if (!PressSpeech.Spoken(wav))
+            {
+                Log.Debug("speak: nothing said in the press, nothing sent");
+                State = Phase.Idle; pressedAt = null;
+                Changed?.Invoke();
+                return null;
+            }
+            // The meeting playing through most of the press: what the mic heard is its echo as much
+            // as me, and Ming would send the other side's words back to them (measured on the Mac).
+            if (Echo is { } echo && echo.Fraction(pressedMono ?? echo.Now - wav.Length / 32000.0, echo.Now) > EchoShare)
+            {
+                Log.Debug("speak: the computer was playing through the press (echo), nothing sent");
+                return Fail(Strings.L("对方在说话时说的，没有说出去"));
+            }
             var to = Target;
             State = Phase.Translating; Said = Heard = Problem = null;
             Changed?.Invoke();
@@ -150,6 +171,13 @@ public sealed class SpeakEngine
             try { heard = await translator.Hear(wav, to, MyLanguage, Priority.Speak); }
             catch (LingException e) { Log.Debug($"speak: hear failed {e.Message}"); return Fail(e.Failure is LingException.Kind.Network or LingException.Kind.Timeout ? (ling.Config.IsLing ? Strings.L("连不上 Ling，没有发出去") : Strings.LF("连不上 %@，没有发出去", ling.Config.Name)) : Strings.L("这句没翻译成 · 没有说出去")); }
             if (heard is null) return Fail(Strings.L("没听清，没有发出去"));
+            if (PressSpeech.Filler(heard.Original))
+            {
+                Log.Debug("speak: only a filler heard, nothing sent");
+                State = Phase.Idle; pressedAt = null;
+                Changed?.Invoke();
+                return null;
+            }
             Said = heard.Original;
             var text = heard.Translation;
             // Ming didn't translate it: the text translator gets one try; failing that, silence.
@@ -236,4 +264,70 @@ public static class VirtualCable
     public const string InputName = "CABLE Input", OutputName = "CABLE Output";
 
     public static bool Verify(byte[] package) => Convert.ToHexString(SHA256.HashData(package)).Equals(PackageSha256, StringComparison.OrdinalIgnoreCase);
+}
+
+/// Whether anyone spoke during a press of the talk key (PressSpeech in SpeakEngine.swift, same
+/// numbers): 0.3 s of 30 ms frames over three times the press's own quiet (its quietest tenth),
+/// between -44 and -36 dBFS. A silent press came back from Ming as "嗯。" and went out as "Hmm.";
+/// a result that is only fillers isn't sent either.
+public static class PressSpeech
+{
+    const int Frame = 480;
+    const double Needed = 0.3;
+
+    /// `wav`: 16 kHz mono 16-bit, with or without its 44-byte header.
+    public static bool Spoken(byte[] wav)
+    {
+        var start = wav.Length >= 44 && wav[0] == 'R' && wav[1] == 'I' ? 44 : 0;
+        var n = (wav.Length - start) / 2;
+        if (n < Frame) return false;
+        var levels = new List<double>();
+        for (var i = 0; i + Frame <= n; i += Frame)
+        {
+            double sum = 0;
+            for (var k = i; k < i + Frame; k++) { double v = BitConverter.ToInt16(wav, start + k * 2) / 32768.0; sum += v * v; }
+            levels.Add(Math.Sqrt(sum / Frame));
+        }
+        var floor = levels.Order().ElementAt(levels.Count / 10);
+        var line = Math.Min(0.016, Math.Max(0.0063, floor * 3));
+        return levels.Count(l => l >= line) * Frame / 16000.0 >= Needed;
+    }
+
+    static readonly HashSet<string> Fillers = ["嗯", "啊", "呃", "哦", "唔", "额", "噢", "哎", "um", "uh", "hmm", "hm", "mm", "mhm", "ah", "oh", "er", "えー", "あの", "음", "어"];
+
+    /// Nothing but fillers (嗯, 啊, um, hmm…), whatever the punctuation.
+    public static bool Filler(string text)
+    {
+        var words = System.Text.RegularExpressions.Regex.Split(text.ToLowerInvariant(), @"[^\p{L}]+").Where(w => w.Length > 0).ToList();
+        return words.Count == 0 || words.All(w => Fillers.Contains(w) || (w.Length > 1 && w.Distinct().Count() == 1 && Fillers.Contains(w[0].ToString())));
+    }
+}
+
+/// When the computer's audio was loud: (time, loud) per buffer of the listening side, the last
+/// minute (Linux's LoudnessLog). Read by the talk key's echo check.
+public sealed class LoudnessLog(Func<double>? clock = null)
+{
+    readonly Func<double> clock = clock ?? (() => Environment.TickCount64 / 1000.0);
+    readonly Queue<(double t, bool loud)> log = new();
+    public double Now => clock();
+
+    public void Add(bool loud)
+    {
+        var now = Now;
+        lock (log)
+        {
+            log.Enqueue((now, loud));
+            while (log.Count > 0 && log.Peek().t < now - 60) log.Dequeue();
+        }
+    }
+
+    /// Share of the buffers between `start` and `end` that were loud (0 with none).
+    public double Fraction(double start, double end)
+    {
+        lock (log)
+        {
+            var span = log.Where(b => b.t >= start && b.t <= end).ToList();
+            return span.Count == 0 ? 0 : span.Count(b => b.loud) / (double)span.Count;
+        }
+    }
 }

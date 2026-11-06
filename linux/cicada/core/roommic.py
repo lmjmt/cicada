@@ -5,6 +5,8 @@ from __future__ import annotations
 
 import threading
 
+from .support import Log
+
 # Sources Cicada makes itself (app/room.py's 知了 麦克风), never a room microphone.
 OURS = ("cicada_mic",)
 
@@ -144,42 +146,107 @@ def place_starts(lines) -> set:
     return out
 
 
-def asks_online(room_only: bool, answered: bool, in_call: bool) -> bool:
-    """线上也有人？: listening to the room alone while a meeting app here is in a call, so people online
-    are likely speaking through it. Once a meeting (the Mac's RoomPrompt.asksOnline)."""
-    return room_only and not answered and in_call
-
-
-def hybrid_note(room_running: bool, echo_cancelled: bool, headphones: bool, headset_default: bool):
-    """The grey line under 听哪里 in 电脑和会议室, when the room isn't heard the plain way (the Mac's
-    HybridNote): without echo cancellation the room pauses while the computer plays speech; with a
-    Bluetooth headset as the default input the computer's own mic hears the room. The string's key."""
-    if not room_running:
-        return None
-    if not echo_cancelled and not headphones:
-        return "线上有人说话时，先不听会议室"
-    if headset_default:
-        return "用电脑自带的麦克风听会议室"
-    return None
-
-
 class EchoGate:
-    """电脑和会议室 without echo cancellation: while the computer plays speech, the room mic hears it
-    again from the speakers. Listening `hold`s the gate on every loud block of the computer's audio;
-    the room mic hears silence until `hang` after the last one (the speakers' tail, the room's echo)."""
+    """打开麦克风 while the computer plays a meeting, without the sound server's echo cancellation: the
+    room mic hears the remote voices again from the speakers (the Mac's EchoGate, same rules). The
+    room mic hears silence while the computer plays speech, until `hang` after it, but only when
+    that is needed and only for speech:
+
+    - Echo is measured: the room mic's loud end while the computer is loud over its floor while the
+      computer is quiet. Headphones or a meeting mic leave it where it was, and then nothing is
+      silenced, so people at the table are heard over a remote speaker too. Until there is enough
+      to tell (and whenever it is unclear) the speakers are taken to echo.
+    - Music isn't speech: a loud stretch the computer's side has recognized no words in for `music`
+      seconds stops closing the gate; words close it again. Longer than the Mac's 4 s: here words
+      only come back after a whole segment has gone to the service."""
     hang = 0.4
+    music = 20.0
+    stretch_gap = 1.5
+    during = 0.15      # computer audio this recent makes a room block "during"
+    quiet_after = 1.0  # …this long ago, "the computer is quiet"
+    echo_ratio = 3.0   # at or over: echo; under clear_ratio: none
+    clear_ratio = 2.0
+    enough = 3.0       # seconds of each a decision needs
+    window = 20.0
 
     def __init__(self):
         self._lock = threading.Lock()
         self._until = 0.0
+        self._last_loud = float("-inf")
+        self._stretch_start = float("-inf")
+        self._last_words = float("-inf")
+        self._during: list = []  # (t, rms, seconds) while the computer is loud
+        self._quiet: list = []
+        self._echo = True
+        self.forced = None  # debug (roomEchoSim): pretend the measurement says this
+
+    @property
+    def echo(self) -> bool:
+        with self._lock:
+            return self._echo if self.forced is None else self.forced
+
+    def _music(self, now: float) -> bool:
+        return (now - self._last_loud <= self.stretch_gap and now - self._stretch_start >= self.music
+                and self._last_words < now - self.music)
+
+    def playing_music(self, now: float) -> bool:
+        with self._lock:
+            return self._music(now)
 
     def hold(self, now: float) -> None:
+        """A loud block of the computer's audio."""
         with self._lock:
+            if now - self._last_loud > self.stretch_gap:
+                self._stretch_start = now
+            self._last_loud = now
+            echo = self._echo if self.forced is None else self.forced
+            if self._music(now) or not echo:
+                return
             self._until = max(self._until, now + self.hang)
+
+    def heard_words(self, now: float) -> None:
+        with self._lock:
+            self._last_words = now
 
     def closed(self, now: float) -> bool:
         with self._lock:
             return now < self._until
+
+    def room_level(self, rms: float, seconds: float, now: float) -> None:
+        """A block of what the room mic heard, before any silencing."""
+        with self._lock:
+            since = now - self._last_loud
+            if since <= self.during:
+                self._during.append((now, rms, seconds))
+            elif since >= self.quiet_after:
+                self._quiet.append((now, rms, seconds))
+            else:
+                return
+            self._during = [b for b in self._during if b[0] >= now - self.window]
+            self._quiet = [b for b in self._quiet if b[0] >= now - self.window * 3]
+            r = self.ratio([(b[1], b[2]) for b in self._during], [(b[1], b[2]) for b in self._quiet])
+            if r is None:
+                return
+            was = self._echo
+            if r >= self.echo_ratio:
+                self._echo = True
+            elif r < self.clear_ratio:
+                self._echo = False
+            if was != self._echo:
+                Log.d("room echo: %s (x%.1f)" % ("speakers reach the mic" if self._echo else "none", r))
+                if not self._echo:
+                    self._until = 0.0
+
+    @classmethod
+    def ratio(cls, during: list, quiet: list):
+        """The room mic's loud end (a fifth of it louder) while the computer is loud over its floor
+        (the quietest fifth) while it is quiet, or None without `enough` of both. People at the table
+        talking over the computer raise it too: that errs on the side of echo."""
+        if sum(s for _, s in during) < cls.enough or sum(s for _, s in quiet) < cls.enough:
+            return None
+        d = sorted(r for r, _ in during)
+        q = sorted(r for r, _ in quiet)
+        return d[len(d) * 4 // 5] / max(q[len(q) // 5], 0.0002)
 
 
 class Heard:

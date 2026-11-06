@@ -31,6 +31,7 @@ object Tests {
             "theLiveMeetingCantBeDeleted" to ::theLiveMeetingCantBeDeleted,
             "followSystemLikeTheMac" to ::followSystemLikeTheMac,
             "anUntranslatedSentenceIsNeitherSentNorRecorded" to ::anUntranslatedSentenceIsNeitherSentNorRecorded,
+            "aSilentHoldOrAFillerIsNotSaid" to ::aSilentHoldOrAFillerIsNotSaid,
             "anUnreachableServiceIsTriedOncePer15s" to ::anUnreachableServiceIsTriedOncePer15s,
             "storeSavesAndDropsEmptyMeetings" to ::storeSavesAndDropsEmptyMeetings,
             "closesInterruptedMeetings" to ::closesInterruptedMeetings,
@@ -1049,6 +1050,40 @@ object Tests {
             check(store.get(engine.sessionId!!)!!.lines.none { it.speaker == "me" }, "nothing recorded")
             engine.stop()
         } finally { LingClient.spacing = old }
+    }
+
+    fun aSilentHoldOrAFillerIsNotSaid() {
+        var asked = 0
+        val fake = Fake { body ->
+            if (body.contains("Ming-3.0-audio-flash")) { asked++; reply("LANG: zh-CN\nORIGINAL: 嗯。\nTRANSLATION: Hmm.") }
+            else Transport.Response(500, "")
+        }
+        val old = LingClient.spacing
+        LingClient.spacing = 0.05
+        try {
+            val ling = client(fake)
+            val store = SessionStore(loadNow = false)
+            val engine = ListenEngine(ling, Translator(ling, fake), store, NotesEngine(ling, store), AppSettings(target = "zh-CN"))
+            var spoken: String? = null
+            engine.onSaid = { text, _ -> spoken = text }
+            val src = ManualSource()
+            engine.start(src, "mic")
+            // Nobody spoke: the room's hush only, loud enough for the old check (rms 0.004).
+            val hush = ShortArray(16000 * 2) { ((if (it % 2 == 0) 1 else -1) * 0.004 * 32767).toInt().toShort() }
+            engine.hold(); src.push(hush); engine.release(); src.push(silence(0.3))
+            Thread.sleep(600)
+            equal(0, asked, "a silent hold isn't sent to the service")
+            equal("没听到声音，靠近手机再说", engine.sayProblem, "and says why")
+            // Ming hears only 嗯: nothing said.
+            engine.hold(); src.push(tone(1.2)); engine.release(); src.push(silence(0.3))
+            val until = System.currentTimeMillis() + 4000
+            while (asked == 0 && System.currentTimeMillis() < until) Thread.sleep(20)
+            Thread.sleep(300)
+            equal(null, spoken, "a filler alone isn't said")
+            check(store.get(engine.sessionId!!)!!.lines.none { it.speaker == "me" }, "nor recorded")
+            engine.stop()
+        } finally { LingClient.spacing = old }
+        check(PressSpeech.filler("嗯嗯。") && PressSpeech.filler("Um, uh...") && !PressSpeech.filler("嗯，好的。") && !PressSpeech.filler("OK."), "fillers")
     }
 
     // MARK: Meeting end (MeetingEndTests.swift, the same cases)

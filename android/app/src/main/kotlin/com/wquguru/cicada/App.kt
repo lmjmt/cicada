@@ -89,6 +89,7 @@ class CicadaApp : Application() {
         background.execute { val t = System.currentTimeMillis(); store.load(); Log.d("store: loaded ${store.all().size} in ${System.currentTimeMillis() - t} ms") }
         notes = NotesEngine(ling, store)
         translator = Translator(ling)
+        translator.googleOff = settings.customOnly
         listen = ListenEngine(ling, translator, store, notes, settings)
         listen.encoder = { pcm ->
             val t = System.currentTimeMillis()
@@ -432,8 +433,20 @@ class CicadaApp : Application() {
 
     /// The service, its address, models or key changed: forget the old check and check again.
     fun aiChanged(check: Boolean = true) {
+        // 语音和文字只发给你的服务 acts on the custom service only: another service brings Google back.
+        translator.googleOff = settings.customOnly
         ling.keyChanged()
         if (check && ling.hasKey) background.execute { ling.check() }
+        changed()
+    }
+
+    /// 语音和文字只发给你的服务: kept for every service, in effect for the custom one. The service is
+    /// the same, so its check stays (not aiChanged, which forgets it).
+    fun setCustomOnly(on: Boolean) {
+        settings.aiCustomOnly = on
+        settings.save()
+        translator.googleOff = settings.customOnly
+        Log.d("ai: custom only ${if (on) "on" else "off"}")
         changed()
     }
 
@@ -454,6 +467,7 @@ class CicadaApp : Application() {
     fun switchService(id: String, key: String) {
         settings.aiProvider = id
         settings.save()
+        translator.googleOff = settings.customOnly
         Log.d("ai: provider $id (the key's own)")
         if (!this.key.save(key)) return
         aiChanged()

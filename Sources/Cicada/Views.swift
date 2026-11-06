@@ -220,8 +220,6 @@ struct MenuPanelView: View {
             if let p = model.ending { MeetingEndingStrip(model: model, pending: p, compact: true) }
             // In subtitle-bar mode this is where the bar sends you to pick.
             if model.running { LanguageNotice(model: model) }
-            if model.roomPrompt { roomPromptStrip }
-            if let app = model.onlinePrompt { onlinePromptStrip(app) }
             if model.hybridMicDenied { hybridMicStrip }
             if let next = model.roomMicLost { roomMicLostStrip(next) }
             AIServiceStrip(model: model, ling: model.ling)
@@ -229,16 +227,6 @@ struct MenuPanelView: View {
             UpdateBanner(updates: model.updates, model: model)
 
             VStack(spacing: 6) {
-                ChoiceRow(label: L("听哪里"), value: settings.listensToRoom ? L("会议室") : settings.hearsBoth ? L("电脑和会议室") : L("电脑声音"),
-                          compact: true, options: [("system", L("电脑声音（线上会议、视频）")), ("room", L("会议室（用麦克风听桌边的人）"))]
-                            // Two recognizers at once: macOS 26 only (14/15's interrupt each other).
-                            + (Recognition.legacy ? [] : [("both", L("电脑和会议室（线上和桌边的人都听）"))])) {
-                    model.listenSourceSelection = $0
-                }
-                if let note = model.hybridNote {
-                    Text(note).font(.system(size: 11)).foregroundStyle(Palette.tertiary)
-                        .frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal, 12)
-                }
                 ChoiceRow(label: L("听到"), value: heardValue.0, badge: heardValue.1, compact: true, sections: sourceSections) {
                     model.sourceSelection = $0
                 }
@@ -250,6 +238,8 @@ struct MenuPanelView: View {
                     model.targetSelection = $0
                 }
             }
+
+            micRow
 
             Divider()
 
@@ -334,25 +324,6 @@ private struct PanelHeightKey: PreferenceKey {
 }
 
 extension MenuPanelView {
-    /// 在会议室里开会？: the Mac has played nothing for a minute. Asked once a meeting.
-    var roomPromptStrip: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            VStack(alignment: .leading, spacing: 2) {
-                Text("在会议室里开会？").font(.system(size: 13, weight: .semibold)).foregroundStyle(Palette.ink)
-                Text("电脑里 1 分钟没放出声音").font(.system(size: 11)).foregroundStyle(Palette.secondary)
-            }
-            HStack(spacing: 8) {
-                SoftButton(L("改听会议室"), dark: true) { model.answerRoomPrompt(true) }
-                SoftButton(L("不是")) { model.answerRoomPrompt(false) }
-                Spacer(minLength: 0)
-            }
-        }
-        .padding(12).frame(maxWidth: .infinity, alignment: .leading)
-        .background(RoundedRectangle(cornerRadius: 11).fill(Palette.accentPale))
-    }
-}
-
-extension MenuPanelView {
     /// 电脑和会议室 without the microphone: the Mac's side is still recorded.
     var hybridMicStrip: some View {
         HStack(spacing: 10) {
@@ -374,25 +345,6 @@ extension MenuPanelView {
         VStack(alignment: .leading, spacing: 2) {
             Text("外接麦克风断开了").font(.system(size: 13, weight: .semibold)).foregroundStyle(Palette.ink)
             Text(next).font(.system(size: 11)).foregroundStyle(Palette.secondary)
-        }
-        .padding(12).frame(maxWidth: .infinity, alignment: .leading)
-        .background(RoundedRectangle(cornerRadius: 11).fill(Palette.accentPale))
-    }
-}
-
-extension MenuPanelView {
-    /// 线上也有人？: listening to the room while a meeting app here is in a call. Asked once a meeting.
-    func onlinePromptStrip(_ app: String) -> some View {
-        VStack(alignment: .leading, spacing: 10) {
-            VStack(alignment: .leading, spacing: 2) {
-                Text("线上也有人？").font(.system(size: 13, weight: .semibold)).foregroundStyle(Palette.ink)
-                Text(L("\(app) 正在通话")).font(.system(size: 11)).foregroundStyle(Palette.secondary)
-            }
-            HStack(spacing: 8) {
-                SoftButton(L("也听电脑"), dark: true) { model.answerOnlinePrompt(true) }
-                SoftButton(L("不用")) { model.answerOnlinePrompt(false) }
-                Spacer(minLength: 0)
-            }
         }
         .padding(12).frame(maxWidth: .infinity, alignment: .leading)
         .background(RoundedRectangle(cornerRadius: 11).fill(Palette.accentPale))
@@ -472,6 +424,63 @@ extension MenuPanelView {
         default:
             return nil
         }
+    }
+}
+
+// MARK: - 麦克风 in the panel
+
+extension MenuPanelView {
+    /// 打开麦克风: the people in the room join the meeting the Mac is hearing.
+    var micRow: some View {
+        HStack(spacing: 10) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text("麦克风").font(.system(size: 14, weight: .semibold)).foregroundStyle(Palette.ink)
+                Text(model.micOn ? L("桌边的人说话也会记下") : L("关着 · 只听电脑声音"))
+                    .font(.system(size: 12)).foregroundStyle(Palette.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Spacer(minLength: 8)
+            MicButton(model: model, settings: settings, inHeader: false)
+        }
+    }
+}
+
+/// 打开麦克风 / 关闭麦克风, the same switch in the panel and the notes window. In the panel it is
+/// the dark button while off (the thing to do) and a quiet one while on; in the notes window's
+/// header it sits beside 结束 like it, tinted while the microphone is on.
+struct MicButton: View {
+    @ObservedObject var model: AppModel
+    @ObservedObject var settings: AppSettings
+    let inHeader: Bool
+
+    var body: some View {
+        let on = model.micOn
+        Button { model.setMic(!on) } label: {
+            HStack(spacing: 5) {
+                Image(systemName: on ? "mic.fill" : "mic")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(on ? Palette.accent : (inHeader ? Palette.ink : Color.white))
+                Text(on ? L("关闭麦克风") : L("打开麦克风")).font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(!on && !inHeader ? Color.white : Palette.ink)
+                    .lineLimit(1).fixedSize()
+            }
+            .padding(.horizontal, inHeader ? 10 : 12).frame(height: 28)
+            .background(RoundedRectangle(cornerRadius: 7).fill(background(on)))
+            .overlay(RoundedRectangle(cornerRadius: 7).stroke(border(on), lineWidth: 1))
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(on ? L("关闭麦克风") : L("打开麦克风"))
+    }
+
+    private func background(_ on: Bool) -> Color {
+        if inHeader { return on ? Palette.accentPale : .clear }
+        return on ? Color.white : Palette.ink
+    }
+
+    private func border(_ on: Bool) -> Color {
+        if inHeader { return on ? Palette.accentPale : Palette.line }
+        return on ? Palette.line : Palette.ink
     }
 }
 
@@ -803,6 +812,12 @@ struct MainWindowView: View {
 
     private var current: Session? { store.session(selection ?? store.sessions.first?.id) }
 
+    /// The shown record's audio: an imported file, or the meeting's own recording once it has ended.
+    private func loadPlayer() {
+        guard let s = current, s.id != store.liveID else { player.load(nil); return }
+        player.load(s, recording: s.hasAudio ? store.systemAudioURL(s.id) : nil)
+    }
+
     var body: some View {
         // One white sheet; the list sits on a faint tint instead of behind a rule. The listening
         // pill lives in the window's toolbar (`MainToolbar`). With no meetings yet, only the
@@ -828,7 +843,13 @@ struct MainWindowView: View {
             return true
         } isTargeted: { dropping = $0 }
         .overlay { if dropping { ImportDropOverlay() } }
-        .onChange(of: current?.id, initial: true) { _, _ in player.load(current) }
+        .onChange(of: current?.id, initial: true) { _, _ in loadPlayer() }
+        // A meeting that ends while it is shown, and its recording once it is rewrapped into an .m4a.
+        .onChange(of: store.liveID) { _, _ in loadPlayer() }
+        .onChange(of: store.audioFinished) { _, id in if id == current?.id { loadPlayer() } }
+        .onReceive(NotificationCenter.default.publisher(for: .debugPlay)) { n in
+            if let t = n.object as? Double { player.play(from: t) }
+        }
         .onChange(of: model.mainShow) { _, show in
             guard let parts = show?.split(separator: ",").map(String.init), let id = parts.first else { return }
             selection = id
@@ -1196,6 +1217,19 @@ struct MainWindowView: View {
                     if player.sessionID == s.id { RecordingPlayerBar(player: player) }
                 }
                 .padding(.top, 16)
+            } else if live {
+                if settings.recordAudio {
+                    Text("会议结束后可以回放录音").font(.system(size: 12)).foregroundStyle(Palette.tertiary).padding(.top, 10)
+                }
+            } else if player.sessionID == s.id {
+                RecordingPlayerBar(player: player).padding(.top, 16)
+            } else if !s.hasAudio, !s.lines.isEmpty {
+                HStack(spacing: 4) {
+                    Text("这场会议没存录音 ·").foregroundStyle(Palette.tertiary)
+                    Button(L("保存会议录音")) { model.openSettings(.records) }
+                        .buttonStyle(.plain).foregroundStyle(Palette.link)
+                }
+                .font(.system(size: 12)).padding(.top, 10)
             }
             tabsRow(s).padding(.top, 24)
         }
@@ -1287,8 +1321,10 @@ struct MainWindowView: View {
                     // In a meeting that heard the room and the Mac, a change of place starts a new run too.
                     let starts = SpeakerLabels.runStarts(s.lines, speakers).union(both ? RecordList.placeStarts(s.lines) : [])
                     let voices = SpeakerLabels.voiceNumbers(s.lines)
+                    let playingLine = player.lineID(in: s)
                     ForEach(s.lines) { l in
-                        lineRow(l, speaker: speakers[l.id], label: speakers.isEmpty || starts.contains(l.id), voices: !speakers.isEmpty, place: both, in: s)
+                        lineRow(l, speaker: speakers[l.id], label: speakers.isEmpty || starts.contains(l.id), voices: !speakers.isEmpty, place: both, in: s,
+                                current: l.id == playingLine)
                             .contextMenu { if !speakers.isEmpty, l.speaker == "them" { assignMenu(s, l, voices) } }
                             .id(l.id)
                     }
@@ -1309,6 +1345,10 @@ struct MainWindowView: View {
                     withAnimation { proxy.scrollTo(last.id, anchor: .bottom) }
                 }
             }
+            // The transcript follows the recording while it plays.
+            .onChange(of: player.lineID(in: s)) { _, id in
+                if player.playing, let id { withAnimation { proxy.scrollTo(id, anchor: .center) } }
+            }
             .onAppear {
                 if let t = jumpTo, let l = s.lines.first(where: { $0.t >= t - 1 }) { proxy.scrollTo(l.id, anchor: .top) }
                 jumpTo = nil
@@ -1316,14 +1356,15 @@ struct MainWindowView: View {
         }
     }
 
-    private func lineRow(_ l: TranscriptLine, speaker: Int? = nil, label: Bool = true, voices: Bool = false, place: Bool = false, in shownSession: Session? = nil) -> some View {
+    private func lineRow(_ l: TranscriptLine, speaker: Int? = nil, label: Bool = true, voices: Bool = false, place: Bool = false, in shownSession: Session? = nil, current: Bool = false) -> some View {
         let me = l.speaker == "me"
         return HStack(alignment: .top, spacing: 16) {
             if let shownSession, player.sessionID == shownSession.id, player.ready {
-                // An imported file plays from this line.
+                // The recording plays from this line.
                 Button { player.play(from: l.t) } label: {
                     Text(TranscriptExport.clock(l.t))
-                        .font(.system(size: 12).monospacedDigit()).foregroundStyle(Palette.link)
+                        .font(.system(size: 12, weight: current ? .semibold : .regular).monospacedDigit())
+                        .foregroundStyle(current ? Palette.accent : Palette.link)
                         .frame(width: 52, alignment: .leading).padding(.top, 1).contentShape(Rectangle())
                 }
                 .buttonStyle(.plain).help(L("从这里播放"))
@@ -1367,6 +1408,8 @@ struct MainWindowView: View {
             Spacer(minLength: 0)
         }
         .padding(.vertical, 12)
+        // The line the recording is playing.
+        .background(RoundedRectangle(cornerRadius: 10).fill(current ? Palette.accentPale : .clear).padding(.horizontal, -10))
     }
 }
 
@@ -1642,4 +1685,9 @@ struct LanguageNotice: View {
         case .other(nil): return nil
         }
     }
+}
+
+extension Notification.Name {
+    /// Debug `play:<seconds>`: the shown record plays from there.
+    static let debugPlay = Notification.Name("cicada.debugPlay")
 }

@@ -21,6 +21,9 @@ class AppSettings(
     var aiCustomVoice: String = "",
     /// The custom service's hear model's own address (the Mac's aiCustomHearBase); empty: the text model's.
     var aiCustomHearBase: String = "",
+    /// 语音和文字只发给你的服务: with the custom service, Google Translate is never asked. Kept when
+    /// another service is picked, but only acts on the custom one (`customOnly`).
+    var aiCustomOnly: Boolean = false,
     /// "notes" (live notes, default) or "subtitles" (the subtitle bar), for the floating window.
     var view: String = "notes",
     /// 共享屏幕时让对方看到: let the floating window show up in screenshots and screen recording.
@@ -60,12 +63,15 @@ class AppSettings(
     /// The AI service in use, its address and models (what LingClient calls with).
     fun aiConfig(): AIConfig = Providers.configFrom(this)
 
+    /// 语音和文字只发给你的服务 in effect: on, and the custom service in use.
+    val customOnly: Boolean get() = aiCustomOnly && aiProvider == "custom"
+
     fun toJson(): Map<String, Any?> = mapOf(
         "target" to target, "notesLanguage" to notesLanguage, "model" to model, "view" to view,
         "aiProvider" to aiProvider, "aiModels" to aiModels.toSortedMap(), "aiHearModels" to aiHearModels.toSortedMap(),
         "aiVoiceModels" to aiVoiceModels.toSortedMap(), "aiCustomBase" to aiCustomBase,
         "aiCustomVoiceBase" to aiCustomVoiceBase, "aiCustomVoice" to aiCustomVoice,
-        "aiCustomHearBase" to aiCustomHearBase,
+        "aiCustomHearBase" to aiCustomHearBase, "aiCustomOnly" to aiCustomOnly,
         "showInCapture" to showInCapture, "onboarded" to onboarded, "uiLanguage" to uiLanguage,
         "source" to source, "overlay" to overlay, "silenceEnd" to silenceEnd, "silenceMinutes" to silenceMinutes,
         "speakerVoices" to speakerVoices, "recordAudio" to recordAudio, "speakBack" to speakBack,
@@ -97,7 +103,7 @@ class AppSettings(
                             aiModels = strings(o["aiModels"]), aiHearModels = strings(o["aiHearModels"]),
                             aiVoiceModels = strings(o["aiVoiceModels"]), aiCustomBase = o["aiCustomBase"].str() ?: "",
                             aiCustomVoiceBase = o["aiCustomVoiceBase"].str() ?: "", aiCustomVoice = o["aiCustomVoice"].str() ?: "",
-                            aiCustomHearBase = o["aiCustomHearBase"].str() ?: "",
+                            aiCustomHearBase = o["aiCustomHearBase"].str() ?: "", aiCustomOnly = o["aiCustomOnly"].bool() ?: false,
                             showInCapture = o["showInCapture"].bool() ?: false, onboarded = o["onboarded"].bool() ?: false,
                             uiLanguage = o["uiLanguage"].str() ?: d.uiLanguage, source = o["source"].str() ?: d.source,
                             overlay = o["overlay"].bool() ?: true,

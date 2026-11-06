@@ -73,6 +73,7 @@ sealed class SettingsWindow : Window
         Section(page, "privacy", L("隐私与启动"), Group(
             Card(Icons.Eye, L("共享屏幕时让对方看到"), L("关着时，截图和屏幕共享里看不到纪要和字幕"), Ui.Switch(app.Settings.ShowInCapture, app.SetShowInCapture, L("共享屏幕时让对方看到"))),
             Card(Icons.List, L("说话人识别"), L("按声音标出说话人 1、2…，只在这台电脑上处理"), Ui.Switch(app.Settings.SpeakerVoices, v => { app.Settings.SpeakerVoices = v; Save(); }, L("说话人识别"))),
+            Card(Icons.Wave, L("保存会议录音"), L("只存在这台电脑上"), Ui.Switch(app.Settings.RecordAudio, v => { app.Settings.RecordAudio = v; Save(); }, L("保存会议录音"))),
             Card(Icons.Power, L("开机时启动知了"), null, Ui.Switch(AutoStart.Enabled, v => AutoStart.Enabled = v, L("开机时启动知了"))),
             Card(Icons.Folder, L("会议记录存放位置"), $"{Paths.Sessions} · {L("和 Mac 版格式相同")}", Ui.Button(L("打开文件夹"), () => OpenFolder(Paths.Sessions), height: 32))));
         // 卸载 as in Settings › Apps, with the same confirmation; only an installed copy offers it.
@@ -439,15 +440,43 @@ sealed class SettingsWindow : Window
         intro.Margin = new Thickness(6, -8, 0, 0);
         yield return intro;
         yield return Group(TextSection(), VoiceSection(), HearSection());
+        yield return Group(OnlyRow());
         var host = ling.ServiceHost.Length > 0 ? ling.ServiceHost : L("你填的地址");
         var lockLine = Ui.Helper(LF("仅保存在本机当前账户下，仅发送至 %@", host));
         lockLine.Margin = new Thickness(6, -4, 0, 0);
         yield return lockLine;
         // What it costs depends on where it runs; what is sent where is the port's own line (it hears through the service).
         var cost = c.Base is { } b && AIProvider.IsNearby(b) ? L("跑在你自己的机器上，不按量计费。") : L("费用以这个服务为准。");
-        var foot = Ui.Helper(cost + LF("听的时候，电脑里的声音会发给 %@。", ling.HearHost.Length > 0 ? ling.HearHost : L("你填的地址")));
+        var foot = Ui.Helper(cost + (app.Settings.AiCustomOnly
+            ? LF("会议的语音和文字只发给 %@，不经过 Google 等外部服务。", CustomHosts())
+            : LF("听的时候，电脑里的声音会发给 %@。", ling.HearHost.Length > 0 ? ling.HearHost : L("你填的地址"))));
         foot.Margin = new Thickness(6, 0, 0, 0);
         yield return foot;
+    }
+
+    /// 语音和文字只发给你的服务 (AISettings.swift › onlyRow): Google is never asked. The grey line says
+    /// what it costs, and while the service can't be reached, that new lines show the original
+    /// (Windows has no translation of its own to stand in).
+    FrameworkElement OnlyRow()
+    {
+        var s = app.Settings;
+        var ling = app.Ling;
+        var check = ling.Health;
+        var down = s.AiCustomOnly && ling.HasKey && !check.IsRunning && check.Failure is not null && !check.IsBusy;
+        var detail = down ? L("现在连不上：新字幕暂时只有原文") : L("不用 Google 翻译；说话时要等整句说完才出译文");
+        return Card(null, L("语音和文字只发给你的服务"), detail,
+            Ui.Switch(s.AiCustomOnly, v => { s.AiCustomOnly = v; s.Save(); app.AIChanged(); Render(); }, L("语音和文字只发给你的服务")));
+    }
+
+    /// Where the custom service's audio and text go: one host when text, hearing and voice share it.
+    string CustomHosts()
+    {
+        var ling = app.Ling;
+        var c = ling.Config;
+        var hosts = new List<string> { ling.ServiceHost, ling.HearHost };
+        if (c.HasVoices && Uri.TryCreate(c.VoiceBase, UriKind.Absolute, out var v)) hosts.Add(v.Host);
+        var set = hosts.Where(h => h.Length > 0).Distinct().ToList();
+        return set.Count == 1 ? set[0] : L("你填的地址");
     }
 
     /// A row that opens to its fields: a state dot, the use, what it runs on, and how it's doing.
@@ -546,7 +575,7 @@ sealed class SettingsWindow : Window
             Card(null, L("模型"), null, model),
             Card(null, "key", null, CustomKey()),
         };
-        if (check.SlowLine() is { } slow) parts.Add(Line(slow, Palette.WarnIcon));
+        if (check.SlowLine(app.Settings.GoogleOff) is { } slow) parts.Add(Line(slow, Palette.WarnIcon));
         var key = ling.CurrentKey();
         if (key is not null && (check.IsRunning || textFailed || check.IsBusy || check.At is not null && !check.Passed && check.Failure is null))
             parts.Add(AICheckView.Steps(app, ChangeKey, recheckInStep: false));

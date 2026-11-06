@@ -28,6 +28,10 @@ class Translator:
         self.transport = transport
         self._google_backoff_until = 0.0
         self._last_unreachable_try = 0.0
+        self._google_off = False
+        # The last finished sentence came back untranslated (TranslationHealth.sentencesUntranslated):
+        # with Google left out, the notes window says the translation waits for the user's service.
+        self.sentences_untranslated = False
         # Names and terms the notes have settled on, e.g. "江充 (…; misheard as 江松)".
         self.glossary = lambda: []
 
@@ -67,10 +71,33 @@ class Translator:
         self._last_unreachable_try = now
         return True
 
+    @property
+    def google_off(self) -> bool:
+        """语音和文字只发给你的服务 (custom service only, set by the app): Google is never asked, so the
+        text stays with the user's service. A stale backoff goes with it either way."""
+        return self._google_off
+
+    @google_off.setter
+    def google_off(self, on: bool) -> None:
+        if on == self._google_off:
+            return
+        self._google_off = on
+        self._google_backoff_until = 0.0
+        self.sentences_untranslated = False
+
     def translate(self, text: str, source: str, target: str, kind: str) -> str | None:
         """Ling (finished sentences only) → Google. None when both fail."""
         if source == target:
             return text
+        # Partial text only ever goes to Google: left out, it shows the original until the sentence ends.
+        if kind == self.DRAFT and self._google_off:
+            return None
+        out = self._translate(text, source, target, kind)
+        if kind != self.DRAFT:
+            self.sentences_untranslated = out is None
+        return out
+
+    def _translate(self, text: str, source: str, target: str, kind: str) -> str | None:
         if kind != self.DRAFT and self.ling.usable and self._ling_worth_trying():
             try:
                 frm = "the spoken language" if source == "auto" else english_name(source)
@@ -86,6 +113,8 @@ class Translator:
                     return cleaned
             except LingError as e:
                 Log.d("translate ling failed: %s" % e)
+        if self._google_off:
+            return None  # left out on purpose: the original only, and no word about Google failing
         if time.time() < self._google_backoff_until:
             return None
         try:

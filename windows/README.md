@@ -1,6 +1,6 @@
 # 知了 Windows 版
 
-Cicada 的 Windows 版：把电脑播放的声音变成双语字幕和实时纪要，存成和 Mac 版同一格式的会议记录；同声传译（按住右 Ctrl 说话，翻译后的声音经 VB-Cable 虚拟麦克风进会议）；说话人识别（按声音标出说话人 1、2…，声纹模型是 WeSpeaker ResNet34-LM，CC BY 4.0，用 `scripts/compress-voiceprint.py` 压成 int8，6.7 MB，由系统自带的 Windows ML 在本机运行）。方案和取舍见 [docs/windows-plan.md](../docs/windows-plan.md)。
+Cicada 的 Windows 版：把电脑播放的声音变成双语字幕和实时纪要，存成和 Mac 版同一格式的会议记录，连同会议录音（`system.m4a`，Windows 自带的 AAC 编码），会后在会议记录里回放；同声传译（按住右 Ctrl 说话，翻译后的声音经 VB-Cable 虚拟麦克风进会议）；说话人识别（按声音标出说话人 1、2…，声纹模型是 WeSpeaker ResNet34-LM，CC BY 4.0，用 `scripts/compress-voiceprint.py` 压成 int8，6.7 MB，由系统自带的 Windows ML 在本机运行）。方案和取舍见 [docs/windows-plan.md](../docs/windows-plan.md)。
 
 - 抓声音：WASAPI 进程回环，排除知了自己（Windows 10 2004 起）。
 - 识别：Ming（`Ming-3.0-audio-flash`）分段识别，一次请求同时返回语言、原文和译文；需要 Ling key。用不了 Ling 的可以在 设置 › AI 服务 换成 OpenRouter、ZenMux 或兼容 OpenAI 的地址：听交给它能输入音频的模型（同样的提示词，字幕晚 1–2 秒），纪要和翻译用它的文字模型，同传声音用它的声音模型，没有时用 Windows 的声音。

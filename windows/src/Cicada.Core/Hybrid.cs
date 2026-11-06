@@ -3,23 +3,94 @@ namespace Cicada;
 // 电脑和会议室: the room side's echo handling, and how its lines are shown (RoomMic.swift,
 // EchoMatch.swift, RecordList.swift).
 
-/// 电脑和会议室 without echo cancellation (Windows has none we can use): while the computer plays
-/// speech, the room mic hears it again from the speakers. The computer's side `Hold`s the gate on
-/// every loud buffer; the room mic hears silence until `Hang` after the last one. Room speech over a
-/// remote speaker is lost this way; EchoMatch catches what still gets through.
+/// 打开麦克风 while the computer plays a meeting: the room mic hears the remote voices again from
+/// the speakers (EchoGate in RoomMic.swift, same rules). The room mic hears silence while the
+/// computer plays speech, until `Hang` after it, but only when that is needed and only for speech:
+///
+/// - Echo is measured: the room mic's loud end while the computer is loud over its floor while the
+///   computer is quiet. Headphones or a meeting mic leave it where it was, and then nothing is
+///   silenced, so people at the table are heard over a remote speaker too. Until there is enough
+///   to tell (and whenever it is unclear) the speakers are taken to echo.
+/// - Music isn't speech: a loud stretch the computer's side has recognized no words in for `Music`
+///   seconds stops closing the gate. Words close it again. Longer than the Mac's 4 s: here words
+///   only come back after a whole segment has gone to the service.
 public sealed class EchoGate(Func<double>? clock = null)
 {
     public const double Hang = 0.4;
+    /// Seconds of loud audio without words before it counts as music.
+    public const double Music = 20;
+    /// A pause this long ends a loud stretch.
+    public const double StretchGap = 1.5;
+    /// Computer audio this recent makes a room block "during"; this long ago, "the computer is quiet".
+    public const double During = 0.15, QuietAfter = 1.0;
+    /// The ratio at or over which there is echo, and under which there is none.
+    public const double EchoRatio = 3, ClearRatio = 2;
+    /// Seconds of each that a decision needs, and how much is kept.
+    public const double Enough = 3, Window = 20;
+
     /// Seconds; a monotonic clock shared with EchoMatch's times.
     public readonly Func<double> Clock = clock ?? (() => Environment.TickCount64 / 1000.0);
     readonly object gate = new();
-    double until = double.NegativeInfinity;
+    double until = double.NegativeInfinity, lastLoud = double.NegativeInfinity, stretchStart = double.NegativeInfinity, lastWords = double.NegativeInfinity;
+    readonly List<(double t, double rms, double s)> during = [], quiet = [];
+    bool echo = true;
+    /// Debug (`roomEchoSim`): pretend the measurement says this.
+    public bool? Forced { get; set; }
 
     /// When the computer last played something loud.
-    public double LastLoud { get { lock (gate) return until - Hang; } }
-
-    public void Hold() { var now = Clock(); lock (gate) until = Math.Max(until, now + Hang); }
+    public double LastLoud { get { lock (gate) return lastLoud; } }
+    /// Whether the speakers reach the room mic, as last measured.
+    public bool Echo { get { lock (gate) return Forced ?? echo; } }
+    public bool PlayingMusic { get { var now = Clock(); lock (gate) return MusicLocked(now); } }
     public bool Closed { get { var now = Clock(); lock (gate) return now < until; } }
+
+    bool MusicLocked(double now) => now - lastLoud <= StretchGap && now - stretchStart >= Music && lastWords < now - Music;
+
+    /// A loud buffer of the computer's audio.
+    public void Hold()
+    {
+        var now = Clock();
+        lock (gate)
+        {
+            if (now - lastLoud > StretchGap) stretchStart = now;
+            lastLoud = now;
+            if (MusicLocked(now) || !(Forced ?? echo)) return;
+            until = Math.Max(until, now + Hang);
+        }
+    }
+
+    /// The computer's side recognized words.
+    public void HeardWords() { var now = Clock(); lock (gate) lastWords = now; }
+
+    /// A buffer of what the room mic heard, before any silencing.
+    public void RoomLevel(double rms, double seconds)
+    {
+        var now = Clock();
+        lock (gate)
+        {
+            var since = now - lastLoud;
+            if (since <= During) during.Add((now, rms, seconds)); else if (since >= QuietAfter) quiet.Add((now, rms, seconds)); else return;
+            during.RemoveAll(b => b.t < now - Window);
+            quiet.RemoveAll(b => b.t < now - Window * 3);
+            if (Ratio(during.Select(b => (b.rms, b.s)), quiet.Select(b => (b.rms, b.s))) is not { } r) return;
+            var was = echo;
+            if (r >= EchoRatio) echo = true; else if (r < ClearRatio) echo = false;
+            if (was == echo) return;
+            Log.Debug($"room echo: {(echo ? "speakers reach the mic" : "none")} (x{r:F1})");
+            if (!echo) until = double.NegativeInfinity;
+        }
+    }
+
+    /// The room mic's loud end (a fifth of it louder) while the computer is loud over its floor (the
+    /// quietest fifth) while it is quiet, or null without `Enough` of both. People at the table
+    /// talking over the computer raise it too: that errs on the side of echo.
+    public static double? Ratio(IEnumerable<(double rms, double s)> during, IEnumerable<(double rms, double s)> quiet)
+    {
+        var d = during.ToList(); var q = quiet.ToList();
+        if (d.Sum(b => b.s) < Enough || q.Sum(b => b.s) < Enough) return null;
+        var ds = d.Select(b => b.rms).Order().ToList(); var qs = q.Select(b => b.rms).Order().ToList();
+        return ds[ds.Count * 4 / 5] / Math.Max(qs[qs.Count / 5], 0.0002);
+    }
 }
 
 /// 电脑和会议室's last line of defence against hearing a remote sentence twice: once from the
@@ -94,13 +165,6 @@ public sealed class EchoFilter(EchoGate gate)
 
     /// The computer played nothing loud around this room line: there is nothing for it to echo.
     public bool Quiet(EchoMatch.Heard room) => Gate.LastLoud < room.Start - EchoMatch.Window;
-}
-
-/// 线上也有人？: listening to the room alone while a meeting app is in a call, so people online are
-/// likely speaking through it. Once a meeting.
-public static class RoomPrompt
-{
-    public static bool AsksOnline(bool roomOnly, bool answered, bool inCall) => roomOnly && !answered && inCall;
 }
 
 /// A meeting that heard both: each of the other side's lines says where (RecordList.swift).

@@ -138,9 +138,15 @@ class RecordActivity : Activity() {
     private var unobserve: (() -> Unit)? = null
     private var player: android.media.MediaPlayer? = null
     private var playButton: android.widget.ImageView? = null
+    private var playFrame: View? = null
     private var playTime: TextView? = null
-    private var playBar: LinearLayout? = null
-    private var playing = -1 // the line being played, for the highlight
+    private var playLength: TextView? = null
+    private var speedLabel: TextView? = null
+    private var scrubber: Scrubber? = null
+    private var speed = 1f
+    // The file is there but MediaPlayer can't open it: said as 找不到录音 instead of a dead bar.
+    private var broken = false
+    private var playing: String? = null // the line at the playhead, for the highlight
     private val tickPlayer = object : Runnable {
         override fun run() { updatePlayer(); if (player?.isPlaying == true) list.postDelayed(this, 250) }
     }
@@ -160,7 +166,7 @@ class RecordActivity : Activity() {
             addHeaderView(header, null, false)
             addFooterView(footer, null, false)
             adapter = this@RecordActivity.adapter
-            setOnItemClickListener { _, _, pos, _ -> (pos - headerViewsCount).takeIf { it >= 0 }?.let { seekTo(it) } }
+            setOnItemClickListener { _, _, pos, _ -> (pos - headerViewsCount).takeIf { it in 0 until this@RecordActivity.adapter.count }?.let { playFrom(this@RecordActivity.adapter.getItem(it).t) } }
             setOnScrollListener(object : android.widget.AbsListView.OnScrollListener {
                 override fun onScrollStateChanged(v: android.widget.AbsListView, state: Int) {}
                 override fun onScroll(v: android.widget.AbsListView, first: Int, visible: Int, total: Int) = pin()
@@ -178,14 +184,17 @@ class RecordActivity : Activity() {
             visibility = View.GONE
             isClickable = true // taps on its edges don't reach the lines under it
         }
+        // The player floats over the bottom of the page (not screen()'s bottom bar), so render()
+        // can show it once a live meeting ends and its recording is in place.
+        playerHost.visibility = View.GONE
         val body = FrameLayout(this).apply {
             addView(list, FrameLayout.LayoutParams(-1, -1))
             addView(pinnedTabs, FrameLayout.LayoutParams(-1, -2, android.view.Gravity.TOP))
+            addView(playerHost, FrameLayout.LayoutParams(-1, -2, android.view.Gravity.BOTTOM))
         }
-        setContentView(ui.screen(this, null, back = true, ground = Palette.card, body = body, scroll = false, center = barTitle, bottom = playerHost.takeIf { audio().isFile }, actions = listOf(
+        setContentView(ui.screen(this, null, back = true, ground = Palette.card, body = body, scroll = false, center = barTitle, actions = listOf(
             ui.roundButton(R.drawable.i_share, L("分享"), onWhite = true) { cicada.store.get(id)?.let(::share) },
             ui.roundButton(R.drawable.i_more, L("更多"), onWhite = true) { more() })))
-        if (audio().isFile) buildPlayer()
     }
 
     private fun audio() = cicada.store.audioFile(id)
@@ -206,15 +215,22 @@ class RecordActivity : Activity() {
     }
 
     override fun onResume() { super.onResume(); unobserve = cicada.observe(::render); shown = null; render() }
-    override fun onPause() { super.onPause(); unobserve?.invoke(); unobserve = null; player?.pause(); updatePlayer() }
-    override fun onDestroy() { super.onDestroy(); player?.release(); player = null }
+    // Leaving the record (back, another screen, the phone locked) stops what it was playing.
+    // Only a playing player is paused: pause() on one that never started puts MediaPlayer in its
+    // error state (the bar came back with a length of 00:00).
+    override fun onPause() { super.onPause(); unobserve?.invoke(); unobserve = null; player?.takeIf { it.isPlaying }?.pause(); if (isFinishing) releasePlayer() else updatePlayer() }
+    override fun onDestroy() { super.onDestroy(); releasePlayer() }
 
     private fun render() {
         val app = cicada
         val s = app.store.get(id) ?: run { if (app.store.loaded) finish(); return }
         val generating = app.notes.generating == id
+        val live = app.listen.listening && app.listen.sessionId == id
+        val file = !live && audio().isFile
+        if (!file) releasePlayer() else if (player == null && !broken) broken = ensurePlayer() == null
+        val playable = file && !broken
         val key = listOf(SessionStore.displayTitle(s), s.lines.size, s.notes?.updatedAt, generating, app.notes.status, tab, s.lines.lastOrNull()?.dst,
-                         s.voiceNames, app.settings.speakerVoices).joinToString("|")
+                         s.voiceNames, app.settings.speakerVoices, live, s.hasAudio, playable, app.settings.recordAudio).joinToString("|")
         if (key == shown) return
         shown = key
         val top = ui.stack(0).apply { setPadding(ui.dp(20), ui.dp(4), ui.dp(20), ui.dp(6)) }
@@ -227,6 +243,7 @@ class RecordActivity : Activity() {
                                  first?.let { "${NotesViews.languageName(it.srcLang)} → ${NotesViews.languageName(it.dstLang)}" },
                                  s.sourceFile?.let { L("导入") }).joinToString(" · ")
         top.addView(ui.text(meta, 13f, Palette.secondary), ui.lp(top = 6))
+        recordingNote(s, live, file, playable)?.let { top.addView(it, ui.lp(top = 6)) }
         speakerChips(s)?.let { top.addView(it, ui.lp(top = 14)) }
         val tabLabels = listOf(L("纪要"), "${L("文字记录")} · ${s.lines.size} ${L("句")}")
         val tabs = ui.tabs(tabLabels, tab) { tab = it; render() }
@@ -245,14 +262,40 @@ class RecordActivity : Activity() {
                 generating -> bottom.addView(ui.text(L("正在整理纪要…"), 15f, Palette.secondary), ui.lp(top = 24))
                 else -> {
                     if (app.notes.status == NotesEngine.State.Failed) bottom.addView(ui.text(L("纪要没生成出来，稍后再试"), 15f, Palette.link), ui.lp(top = 24))
-                    val live = app.listen.listening && app.listen.sessionId == id
                     if (!live) bottom.addView(ui.button(L("生成纪要"), "primary") { app.notes.generate(id) }, ui.lp(top = 20))
                 }
             }
         }
         footer.removeAllViews(); footer.addView(bottom)
+        if (playable && playerHost.childCount == 0) buildPlayer()
+        playerHost.visibility = if (playable) View.VISIBLE else View.GONE
+        // The last lines end above the floating player, but scroll under it.
+        list.setPadding(0, 0, 0, ui.dp(if (playable) 124 else 40))
         val lines = if (tab == 1) app.store.lines(id) else emptyList()
-        adapter.show(lines, SpeakerLabels.numbers(lines), SpeakerLabels.names(s), s.sourceFile == null)
+        adapter.show(lines, SpeakerLabels.numbers(lines), SpeakerLabels.names(s), s.sourceFile == null, playable)
+        updatePlayer()
+    }
+
+    /// One grey line under the date when there is nothing to play: why, and where to change it.
+    private fun recordingNote(s: Session, live: Boolean, file: Boolean, playable: Boolean): View? {
+        fun note(text: String) = ui.text(text, 12f, Palette.secondary)
+        return when {
+            playable -> null
+            live -> if (cicada.settings.recordAudio) note(L("会议结束后可以回放录音")) else null
+            // Just ended: the recorder is still closing the file (the page updates once it's in place).
+            java.io.File(audio().path + ".partial").isFile -> null
+            file || s.hasAudio -> note(L("找不到录音，没法播放"))
+            s.lines.isEmpty() -> null
+            else -> LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = android.view.Gravity.CENTER_VERTICAL
+                addView(note(L("这场会议没存录音 ·")))
+                addView(ui.text(L("保存会议录音"), 12f, Palette.link, bold = true).apply {
+                    setPadding(ui.dp(4), ui.dp(8), ui.dp(4), ui.dp(8))
+                    ui.tappable(this, 8) { startActivity(Intent(this@RecordActivity, SettingsActivity::class.java)) }
+                })
+            }
+        }
     }
 
     /// The voices told apart (in records from the Mac or Windows): a chip each; a tap names it.
@@ -290,9 +333,11 @@ class RecordActivity : Activity() {
         private var numbers: Map<String, Int> = emptyMap()
         private var names: Map<Int, String> = emptyMap()
         private var who = true
-        fun show(l: List<cicada.TranscriptLine>, n: Map<String, Int>, nm: Map<Int, String>, speakers: Boolean) {
-            lines = l; numbers = n; names = nm; who = speakers; notifyDataSetChanged()
+        private var playable = false
+        fun show(l: List<cicada.TranscriptLine>, n: Map<String, Int>, nm: Map<Int, String>, speakers: Boolean, canPlay: Boolean) {
+            lines = l; numbers = n; names = nm; who = speakers; playable = canPlay; notifyDataSetChanged()
         }
+        fun indexOf(lineId: String?) = if (lineId == null) -1 else lines.indexOfFirst { it.id == lineId }
         override fun getCount() = lines.size
         override fun getItem(i: Int) = lines[i]
         override fun getItemId(i: Int) = i.toLong()
@@ -308,9 +353,17 @@ class RecordActivity : Activity() {
                     ui.text("", Ui.Type.BODY, Palette.ink).apply { leading(1.5f) }), ui.weight())
             }
             val l = lines[i]
-            val now = i == playing
-            row.setBackgroundColor(if (now) 0x0FE8552B else 0)
-            (row.getChildAt(0) as TextView).apply { text = Languages.clock(l.t); setTextColor(if (now) Palette.link else Palette.tertiary) }
+            val now = l.id == playing
+            row.setBackgroundColor(if (now) PLAYING_LINE else 0)
+            // With a recording the time is a link that plays from there; the line at the playhead
+            // has it in the accent.
+            (row.getChildAt(0) as TextView).apply {
+                text = Languages.clock(l.t)
+                setTextColor(when { now -> Palette.accent; playable -> Palette.link; else -> Palette.tertiary })
+                typeface = if (now) android.graphics.Typeface.create(android.graphics.Typeface.DEFAULT, 600, false) else android.graphics.Typeface.DEFAULT
+                if (playable) setOnClickListener { playFrom(l.t) } else { setOnClickListener(null); isClickable = false }
+                contentDescription = if (playable) "${L("播放")} ${text}" else null
+            }
             val texts = row.getChildAt(1) as LinearLayout
             val name = SpeakerLabels.speakerName(l, numbers, names)
             (texts.getChildAt(0) as TextView).apply {
@@ -329,72 +382,171 @@ class RecordActivity : Activity() {
 
     // MARK: The recording (保存会议录音)
 
+    /// The floating player (iOS's PlayerBar on a white card): play / pause, the progress line
+    /// (drag it to seek), the time and the length under it, and the speed.
     private fun buildPlayer() {
         val play = android.widget.ImageView(this).apply { setImageDrawable(ui.drawable(R.drawable.i_play, android.graphics.Color.WHITE)); importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO }
         val button = FrameLayout(this).apply {
-            contentDescription = L("播放原声")
+            contentDescription = L("播放")
             addView(play, FrameLayout.LayoutParams(ui.dp(20), ui.dp(20), android.view.Gravity.CENTER))
             ui.tappable(this, 24, ui.rounded(Palette.ink, 24), dark = true) { toggle() }
         }
-        val bar = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; background = ui.rounded(Palette.line, 2); weightSum = 1f
-            addView(View(context).apply { background = ui.rounded(Palette.accent, 2) }, LinearLayout.LayoutParams(0, -1, 0f)) }
+        val scrub = Scrubber()
         val time = ui.text("00:00", 11f, Palette.secondary).apply { fontFeatureSettings = "tnum" }
-        val pill = LinearLayout(this).apply {
+        val length = ui.text("00:00", 11f, Palette.secondary).apply { fontFeatureSettings = "tnum"; gravity = android.view.Gravity.END }
+        val times = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            addView(time, ui.weight()); addView(length, LinearLayout.LayoutParams(-2, -2))
+        }
+        val speedText = ui.text("1×", 13f, Palette.ink, bold = true, lines = 1).apply { fontFeatureSettings = "tnum"; gravity = android.view.Gravity.CENTER }
+        val speedButton = FrameLayout(this).apply {
+            contentDescription = L("播放速度")
+            addView(speedText, FrameLayout.LayoutParams(-1, -1))
+            ui.tappable(this, 24) { cycleSpeed() }
+        }
+        val card = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = android.view.Gravity.CENTER_VERTICAL
             // On the white page a shadow alone doesn't separate it: a hairline too.
             background = ui.rounded(Palette.card, 32, Palette.line, 1)
             ui.lift(this, 6)
-            setPadding(ui.dp(8), ui.dp(8), ui.dp(18), ui.dp(8))
+            setPadding(ui.dp(8), ui.dp(4), ui.dp(4), ui.dp(4))
             addView(button, LinearLayout.LayoutParams(ui.dp(48), ui.dp(48)))
-            addView(ui.stack(6, bar.apply { layoutParams = LinearLayout.LayoutParams(-1, ui.dp(4)) }, time), ui.weight().apply { leftMargin = ui.dp(14) })
+            // The line's touch area is taller than the line (scrub.height), the times tucked under it.
+            addView(LinearLayout(context).apply {
+                orientation = LinearLayout.VERTICAL
+                addView(scrub, LinearLayout.LayoutParams(-1, ui.dp(24)))
+                addView(times, LinearLayout.LayoutParams(-1, -2).apply { topMargin = -ui.dp(4) })
+            }, ui.weight().apply { leftMargin = ui.dp(14) })
+            addView(speedButton, LinearLayout.LayoutParams(ui.dp(52), ui.dp(48)).apply { leftMargin = ui.dp(4) })
         }
-        playButton = play; playTime = time; playBar = bar
+        playButton = play; playFrame = button; playTime = time; playLength = length; speedLabel = speedText; scrubber = scrub
         playerHost.addView(LinearLayout(this).apply {
             background = ui.fade(Palette.card)
             setPadding(ui.dp(16), ui.dp(28), ui.dp(16), ui.dp(16))
-            addView(pill, LinearLayout.LayoutParams(-1, ui.dp(64)))
+            addView(card, LinearLayout.LayoutParams(-1, ui.dp(64)))
         })
-        updatePlayer()
     }
+
+    /// The progress line: the track grey, what has played in the accent; a tap or a drag seeks.
+    private inner class Scrubber : View(this@RecordActivity) {
+        var fraction = 0f; set(v) { field = v; invalidate() }
+        var dragging = false; private set
+        private val paint = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG)
+
+        override fun onDraw(c: android.graphics.Canvas) {
+            val r = ui.dp(2).toFloat()
+            val y = height / 2f
+            val x = width * fraction
+            paint.color = TRACK
+            c.drawRoundRect(0f, y - r, width.toFloat(), y + r, r, r, paint)
+            paint.color = Palette.accent
+            if (x > 0) c.drawRoundRect(0f, y - r, maxOf(x, 2 * r), y + r, r, r, paint)
+            if (dragging) c.drawCircle(x, y, ui.dp(7).toFloat(), paint)
+        }
+
+        override fun onTouchEvent(e: android.view.MotionEvent): Boolean {
+            val f = if (width > 0) (e.x / width).coerceIn(0f, 1f) else 0f
+            when (e.actionMasked) {
+                android.view.MotionEvent.ACTION_DOWN -> { parent.requestDisallowInterceptTouchEvent(true); dragging = true; fraction = f; showTime() }
+                android.view.MotionEvent.ACTION_MOVE -> { fraction = f; showTime() }
+                android.view.MotionEvent.ACTION_UP -> { dragging = false; fraction = f; seekFraction(f) }
+                android.view.MotionEvent.ACTION_CANCEL -> { dragging = false; updatePlayer() }
+            }
+            return true
+        }
+
+        // While dragging the time follows the finger; the player moves on release.
+        private fun showTime() { playTime?.text = Languages.clock(fraction * length()) }
+    }
+
+    private fun length() = (player?.duration ?: 0).takeIf { it > 0 }?.div(1000.0) ?: 0.0
 
     private fun ensurePlayer(): android.media.MediaPlayer? {
         player?.let { return it }
         return try {
             android.media.MediaPlayer().apply {
+                setAudioAttributes(android.media.AudioAttributes.Builder().setUsage(android.media.AudioAttributes.USAGE_MEDIA)
+                    .setContentType(android.media.AudioAttributes.CONTENT_TYPE_SPEECH).build())
                 setDataSource(audio().path); prepare()
                 setOnCompletionListener { updatePlayer() }
             }.also { player = it }
         } catch (e: Exception) { Log.d("record: play failed ${e.javaClass.simpleName}"); null }
     }
 
+    private fun releasePlayer() {
+        list.removeCallbacks(tickPlayer)
+        player?.release(); player = null
+        playing = null
+    }
+
+    private fun start(p: android.media.MediaPlayer) {
+        p.start()
+        // Setting the speed on a paused player starts it on some versions: only ever while playing.
+        if (speed != 1f) try { p.playbackParams = p.playbackParams.setSpeed(speed) } catch (_: Exception) {}
+        list.removeCallbacks(tickPlayer); list.post(tickPlayer)
+    }
+
     private fun toggle() {
         val p = ensurePlayer() ?: return
-        if (p.isPlaying) p.pause() else { p.start(); list.post(tickPlayer) }
+        if (p.isPlaying) p.pause() else start(p)
         updatePlayer()
     }
 
-    /// A tap on a line plays the recording from there.
-    private fun seekTo(index: Int) {
-        if (!audio().isFile) return
-        val l = adapter.getItem(index)
+    /// A line's time (or the line): plays the recording from where it was said.
+    private fun playFrom(t: Double) {
+        if (playerHost.visibility != View.VISIBLE) return
         val p = ensurePlayer() ?: return
-        p.seekTo((l.t * 1000).toInt())
-        if (!p.isPlaying) { p.start(); list.post(tickPlayer) }
+        p.seekTo((t * 1000).toLong().coerceAtLeast(0), android.media.MediaPlayer.SEEK_CLOSEST)
+        if (!p.isPlaying) start(p)
         updatePlayer()
+    }
+
+    private fun seekFraction(f: Float) {
+        val p = ensurePlayer() ?: return
+        p.seekTo((f * p.duration).toLong(), android.media.MediaPlayer.SEEK_CLOSEST)
+        updatePlayer()
+    }
+
+    /// 1× → 1.5× → 2× → 1×.
+    private fun cycleSpeed() {
+        speed = when (speed) { 1f -> 1.5f; 1.5f -> 2f; else -> 1f }
+        speedLabel?.text = if (speed == 1.5f) "1.5×" else "${speed.toInt()}×"
+        val p = player
+        if (p?.isPlaying == true) try { p.playbackParams = p.playbackParams.setSpeed(speed) } catch (_: Exception) {}
     }
 
     private fun updatePlayer() {
         val p = player
+        val on = p?.isPlaying == true
         val pos = (p?.currentPosition ?: 0) / 1000.0
-        val dur = (p?.duration ?: 0).takeIf { it > 0 }?.div(1000.0) ?: cicada.store.get(id)?.durationSeconds ?: 0.0
-        playButton?.setImageDrawable(ui.drawable(if (p?.isPlaying == true) R.drawable.i_pause else R.drawable.i_play, android.graphics.Color.WHITE))
-        playTime?.text = "${Languages.clock(pos)} / ${Languages.clock(dur)}"
-        playBar?.getChildAt(0)?.let { (it.layoutParams as LinearLayout.LayoutParams).weight = if (dur > 0) (pos / dur).toFloat().coerceIn(0f, 1f) else 0f; it.requestLayout() }
-        // The line being heard, highlighted.
-        val lines = (0 until adapter.count).map { adapter.getItem(it) }
-        val now = if (p?.isPlaying == true || pos > 0) lines.indexOfLast { it.t <= pos } else -1
-        if (now != playing) { playing = now; adapter.notifyDataSetChanged() }
+        val dur = length()
+        playButton?.setImageDrawable(ui.drawable(if (on) R.drawable.i_pause else R.drawable.i_play, android.graphics.Color.WHITE))
+        playFrame?.contentDescription = if (on) L("暂停") else L("播放")
+        if (scrubber?.dragging != true) {
+            playTime?.text = Languages.clock(pos)
+            scrubber?.fraction = if (dur > 0) (pos / dur).toFloat().coerceIn(0f, 1f) else 0f
+        }
+        playLength?.text = Languages.clock(dur)
+        // The line being heard: the last one that started at or before the playhead, once
+        // playing has begun (iOS's lineID).
+        val lines = if (p != null && (on || pos > 0)) cicada.store.get(id)?.lines.orEmpty() else emptyList()
+        val now = lines.lastOrNull { it.t <= pos + 0.2 }?.id
+        if (now == playing) return
+        playing = now
+        adapter.notifyDataSetChanged()
+        if (on) keepInView(adapter.indexOf(now))
+    }
+
+    /// Scrolls the transcript so the line being heard is on screen, clear of the pinned tabs
+    /// and the player; left alone while it already is.
+    private fun keepInView(index: Int) {
+        if (index < 0) return
+        val pos = index + list.headerViewsCount
+        val row = list.getChildAt(pos - list.firstVisiblePosition)
+        val top = if (pinnedTabs.visibility == View.VISIBLE) pinnedTabs.height else 0
+        if (row != null && row.top >= top && row.bottom <= list.height - playerHost.height) return
+        list.smoothScrollToPositionFromTop(pos, top + ui.dp(24), 300)
     }
 
     // MARK: 更多: export and the rest
@@ -461,5 +613,11 @@ class RecordActivity : Activity() {
 
     private fun delete(s: Session) {
         ui.confirm(this, L("删除"), LF("删除“%@”？删掉后不能恢复", SessionStore.displayTitle(s)), ok = L("删除"), destructive = true) { cicada.store.delete(s.id); finish() }
+    }
+
+    private companion object {
+        /// The line being heard (the design's pale accent) and the player's unplayed track.
+        val PLAYING_LINE = android.graphics.Color.parseColor("#FDEEE7")
+        val TRACK = android.graphics.Color.parseColor("#E1E3E8")
     }
 }

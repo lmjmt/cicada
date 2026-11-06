@@ -177,8 +177,9 @@ static class Tests
             ("C:#Program Files (x86)#Tencent#WeMeet#wemeetapp.exe", 133_000_000_000), // used earlier, closed now
             ("C:#Program Files#Google#Chrome#Application#chrome.exe", 0),               // a browser isn't a meeting app
             ("MSTeams_8wekyb3d8bbwe", 0),
+            ("C:#Program Files (x86)#WXWork#WXWork.exe", 0),
         ]);
-        Equal("Teams=msteams,Zoom=zoom.exe", string.Join(",", calls.OrderBy(p => p.Value).Select(p => $"{p.Value}={p.Key}")), "meeting apps reading a mic");
+        Equal("Teams=msteams,Zoom=zoom.exe,企业微信=wxwork.exe", string.Join(",", calls.OrderBy(p => p.Value).Select(p => $"{p.Value}={p.Key}")), "meeting apps reading a mic");
         Equal(0, MicUse.Calls([]).Count, "none");
     }
 
@@ -306,6 +307,127 @@ static class Tests
         Equal("room", s.Lines[0].Via, "a line the room mic heard");
         Equal("周会.m4a", s.SourceFile, "sourceFile");
         Check(JsonNode.DeepEquals(JsonNode.Parse(mac), JsonNode.Parse(Json.Write(s))), "written back with every key: " + Json.Write(s));
+    }
+
+    // MARK: 保存会议录音
+
+    /// Records what it is given; the "file" is a list of samples, and Rewrap copies the partial file.
+    sealed class FakeAudio : IAudioFiles
+    {
+        public readonly List<short> Samples = [];
+        public bool Closed;
+        public readonly List<(string from, string to, double? until)> Rewraps = [];
+        public IAudioWriter? Open(string path) { File.WriteAllBytes(path, [0xFF, 0xF1]); return new Writer(this); }
+        public bool Rewrap(string from, string to, double? until) { Rewraps.Add((from, to, until)); File.Copy(from, to, true); return true; }
+        sealed class Writer(FakeAudio a) : IAudioWriter
+        {
+            public void Write(ReadOnlySpan<short> pcm) { lock (a.Samples) a.Samples.AddRange(pcm.ToArray()); }
+            public void Close() => a.Closed = true;
+        }
+    }
+
+    /// Loopback as it really is: sound while something plays, nothing at all in between.
+    sealed class GappySource(params (double seconds, bool sound)[] parts) : IAudioSource
+    {
+        public event Action<short[]>? Samples;
+        public event Action<string?>? Ended;
+        public void Start() => Task.Run(async () =>
+        {
+            foreach (var (seconds, sound) in parts)
+            {
+                if (!sound) { await Task.Delay(TimeSpan.FromSeconds(seconds)); continue; }
+                for (int i = 0; i < seconds * 10; i++) { Samples?.Invoke(Tone(0.1, 0.002)); await Task.Delay(100); }
+            }
+            Ended?.Invoke(null);
+        });
+        public void Stop() { }
+    }
+
+    public static void SilenceGoesInOnlyOnceTheStreamIsASecondBehind()
+    {
+        Equal(0, Recording.Behind(0.5, 0, 1600), "a packet a little late: nothing");
+        Equal(0, Recording.Behind(2.0, 16000, 1600), "0.9 s behind: still nothing");
+        Equal(24000, Recording.Behind(2.6, 16000, 1600), "1.5 s behind after 1.1 s of audio: 1.5 s of silence");
+        Equal(0, Recording.Behind(1.0, 64000, 1600), "ahead of the clock: nothing");
+    }
+
+    public static async Task TheRecordingKeepsTheMeetingsClock()
+    {
+        // 0.5 s of sound, 2.5 s of nothing (loopback while the PC is silent), 0.5 s of sound.
+        var fake = new Fake(_ => Reply("{}"));
+        var ling = Client(fake);
+        var store = new SessionStore { Audio = new FakeAudio() };
+        var audio = (FakeAudio)store.Audio;
+        var engine = new ListenEngine(ling, new Translator(ling), store, new NotesEngine(ling, store), new AppSettings { Target = "zh-CN", SpeakerVoices = false });
+        var source = new GappySource((0.5, true), (2.5, false), (0.5, true));
+        var ended = new TaskCompletionSource();
+        source.Ended += _ => ended.TrySetResult();
+        engine.Start(source);
+        var id = engine.SessionId!;
+        Check(File.Exists(Recording.Partial(Recording.SystemAudio(id))), "written as system.aac while live");
+        await ended.Task;
+        var wall = (DateTimeOffset.Now - store.Get(id)!.StartedAt).TotalSeconds;
+        await engine.Stop();
+        Check(audio.Closed, "closed when the meeting ends");
+        var recorded = audio.Samples.Count / 16000.0;
+        Check(recorded > wall - 1.1 && recorded < wall + 0.2, $"the recording ({recorded:F2} s) is as long as the meeting ({wall:F2} s)");
+
+        var off = new SessionStore { Audio = new FakeAudio() };
+        var quiet = new ListenEngine(ling, new Translator(ling), off, new NotesEngine(ling, off), new AppSettings { RecordAudio = false });
+        quiet.Start(new GappySource((0.2, true)));
+        Check(!File.Exists(Recording.Partial(Recording.SystemAudio(quiet.SessionId!))), "保存会议录音 off: no file");
+        await quiet.Stop();
+    }
+
+    public static async Task EndingAMeetingFinishesItsRecording()
+    {
+        var audio = new FakeAudio();
+        var store = new SessionStore { Audio = audio };
+        var s = store.Begin(DateTimeOffset.Parse("2026-02-01T02:00:00Z"));
+        store.Append(s.Id, new TranscriptLine { Id = "h1-1", Src = "hi", SrcLang = "en", DstLang = "zh-CN", T = 3 });
+        var m4a = Recording.SystemAudio(s.Id);
+        Directory.CreateDirectory(Path.GetDirectoryName(m4a)!);
+        File.WriteAllBytes(Recording.Partial(m4a), [1]);
+        store.End(s.Id, DateTimeOffset.Parse("2026-02-01T02:10:00Z"));
+        Check(store.Get(s.Id)!.HasAudio, "hasAudio once a recording exists");
+        for (int i = 0; i < 50 && !File.Exists(m4a); i++) await Task.Delay(20);
+        Check(File.Exists(m4a) && !File.Exists(Recording.Partial(m4a)), "rewrapped into system.m4a, the partial file gone");
+        Equal(600.0, audio.Rewraps[0].until, "a meeting that ended by itself is cut where it ended");
+        Equal(m4a, Recording.Playable(store.Get(s.Id)!), "it plays");
+
+        // A meeting the app didn't get to close: finished at the next launch.
+        var t = store.Begin(DateTimeOffset.Parse("2026-02-02T02:00:00Z"));
+        store.Append(t.Id, new TranscriptLine { Id = "h1-1", Src = "hi", SrcLang = "en", DstLang = "zh-CN" });
+        store.Flush();
+        File.WriteAllBytes(Recording.Partial(Recording.SystemAudio(t.Id)), [1]);
+        var later = new SessionStore { Audio = audio };
+        later.FinishLeftovers();
+        for (int i = 0; i < 50 && !File.Exists(Recording.SystemAudio(t.Id)); i++) await Task.Delay(20);
+        Check(later.Get(t.Id)!.HasAudio && File.Exists(Recording.SystemAudio(t.Id)), "a crash's recording is kept");
+        Equal(null, Recording.Playable(new Session { Id = "20990101-000000" }), "no file: nothing to play");
+    }
+
+    public static void AdtsFramesAreSplitAndACutOneDropped()
+    {
+        // Two AAC-LC 16 kHz mono frames of 10 and 12 bytes (7-byte headers), then half a third.
+        static byte[] Frame(int payload)
+        {
+            int length = 7 + payload;
+            var f = new byte[length];
+            f[0] = 0xFF; f[1] = 0xF1; f[2] = (1 << 6) | (8 << 2); f[3] = (byte)((1 << 6) | (length >> 11));
+            f[4] = (byte)(length >> 3); f[5] = (byte)((length & 7) << 5 | 0x1F); f[6] = 0xFC;
+            for (int i = 7; i < length; i++) f[i] = (byte)i;
+            return f;
+        }
+        byte[] file = [.. Frame(3), .. Frame(5), .. Frame(9)[..8]];
+        var config = Adts.Read(file)!;
+        Equal(16000, config.Rate, "rate");
+        Equal(1, config.Channels, "mono");
+        Equal("14-08", BitConverter.ToString(config.SpecificConfig), "AudioSpecificConfig of AAC-LC 16 kHz mono");
+        var frames = Adts.Frames(file);
+        Equal(2, frames.Count, "the cut-off frame is left out");
+        Equal(new Adts.Frame(7, 3), frames[0], "payload without the header");
+        Equal(new Adts.Frame(17, 5), frames[1], "second frame");
     }
 
     // MARK: 会议室
@@ -1101,6 +1223,37 @@ static class Tests
         Check(got is [0, 0], "silence while you hold the talk key");
     }
 
+    public static void EchoGateOnlyForSpeechThatReachesTheMic()
+    {
+        double now = 0;
+        var g = new EchoGate(() => now);
+        // Music: loud, and no words for EchoGate.Music seconds.
+        for (; now < EchoGate.Music - 1; now += 0.1) g.Hold();
+        Check(g.Closed && !g.PlayingMusic, "no words yet: still taken for speech");
+        for (; now < EchoGate.Music + 1; now += 0.1) g.Hold();
+        Check(g.PlayingMusic, "no words for long: music");
+        now += EchoGate.Hang + 0.01; g.Hold(); now += 0.01;
+        Check(!g.Closed, "music doesn't close the gate");
+        g.HeardWords(); g.Hold(); now += 0.1;
+        Check(g.Closed, "words close it again");
+
+        // Headphones: the room mic stays at its floor while the computer plays.
+        now = 1000;
+        var h = new EchoGate(() => now);
+        Check(h.Echo, "echo until measured");
+        for (var t = 0; t < 60; t++) { h.Hold(); now += 0.05; h.RoomLevel(0.001, 0.1); now += 0.05; }
+        for (var t = 0; t < 60; t++) { now += 0.1; h.RoomLevel(0.001, 0.1); }
+        Check(!h.Echo, "no echo measured with headphones");
+        h.Hold(); now += 0.1;
+        Check(!h.Closed, "the room stays open with headphones");
+        // Speakers: the mic hears the computer.
+        now += 100;
+        for (var t = 0; t < 60; t++) { h.Hold(); now += 0.05; h.RoomLevel(0.03, 0.1); now += 0.05; }
+        for (var t = 0; t < 60; t++) { now += 0.1; h.RoomLevel(0.001, 0.1); }
+        Check(h.Echo, "echo again once the speakers reach the mic");
+        Check(EchoGate.Ratio([(0.001, 1)], [(0.001, 10)]) is null, "not enough to tell");
+    }
+
     sealed class Pump : IAudioSource
     {
         public event Action<short[]>? Samples;
@@ -1118,7 +1271,6 @@ static class Tests
         Check(Places.HeardBoth([L("a", via: "room"), L("b")]), "both");
         var starts = Places.Starts([L("a"), L("b"), L("c", via: "room"), L("d", "me"), L("e", via: "room"), L("f")]);
         Check(starts.SetEquals(["a", "c", "e", "f"]), "a change of place starts a run: " + string.Join(",", starts));
-        Check(RoomPrompt.AsksOnline(true, false, true) && !RoomPrompt.AsksOnline(true, true, true) && !RoomPrompt.AsksOnline(false, false, true) && !RoomPrompt.AsksOnline(true, false, false), "线上也有人？ once, in a call, in the room");
     }
 
     public static async Task TheRoomSideDropsTheSpeakersAndKeepsTheTable()
@@ -1290,6 +1442,38 @@ static class Tests
             Check(quiet.Chunks.Count == 0 && voice2.Calls == 0 && e2.State == SpeakEngine.Phase.Failed, "and no voice at all");
         }
         finally { LingClient.Spacing = old; }
+    }
+
+    public static async Task SilencesFillersAndEchoAreNotSent()
+    {
+        var old = LingClient.Spacing;
+        LingClient.Spacing = 0.01;
+        try
+        {
+            var asked = 0;
+            var reply = "LANG: zh-CN\nORIGINAL: 嗯。\nTRANSLATION: Hmm.";
+            var fake = new Fake(body =>
+            {
+                if (body.Contains(LingClient.AudioModel)) { Interlocked.Increment(ref asked); return Reply(reply); }
+                return new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent("data:{\"type\":\"speech.audio.done\"}\n\n") };
+            });
+            var engine = Speaker(Client(fake), new NoVoice(), new AppSettings { SpeakFrom = "zh-CN" });
+            // A press nobody spoke in: not even sent to the service.
+            Check(await engine.Speak(Wav.Bytes(new short[16000 * 3]), new Sink()) is null && asked == 0, "a silent press sends nothing");
+            Check(engine.State == SpeakEngine.Phase.Idle && engine.Problem is null, "and says nothing about it");
+            // Ming heard only 嗯: nothing goes out.
+            Check(await engine.Speak(Wav.Bytes(Tone(1)), new Sink()) is null && asked == 1, "a filler alone isn't sent");
+            // The computer played through the press: its echo, not me.
+            double now = 0;
+            var log = new LoudnessLog(() => now);
+            engine.Echo = log;
+            engine.BeginRecording();
+            for (var i = 0; i < 30; i++) { log.Add(true); now += 0.1; }
+            Check(await engine.Speak(Wav.Bytes(Tone(1)), new Sink()) is null && asked == 1, "pressed while the meeting played: not sent");
+            Equal(Strings.L("对方在说话时说的，没有说出去"), engine.Problem, "and the bar says why");
+        }
+        finally { LingClient.Spacing = old; }
+        Check(PressSpeech.Filler("嗯嗯。") && PressSpeech.Filler("Um, uh...") && !PressSpeech.Filler("嗯，好的。") && !PressSpeech.Filler("OK."), "fillers");
     }
 
     public static async Task WhatISayGoesAheadOfTheMeeting()
@@ -1705,6 +1889,9 @@ static class Tests
                 "the hear model at its own address, which refused it on its own");
             Check(ling.Health.Translate is { Thinks: true } && ling.Health.Slow, ling.Health.Summary);
             Check(ling.Health.SlowLine()!.Contains("先思考"), "says why");
+            Check(ling.Health.SlowLine()!.Contains("Google"), "and that Google stands in");
+            Check(ling.Health.SlowLine(googleOff: true) is { } only && only.Contains("先思考") && only.Contains("不等它了") && !only.Contains("Google"),
+                "语音和文字只发给你的服务: no Google to fall back on");
             Equal(AICheck.Kind.Ok, ling.Health[AICheck.StepId.Hear].Kind, "hears");
             ling.KeyChanged();
             fake.Sent.Clear();
@@ -1712,6 +1899,73 @@ static class Tests
             Check(fake.Sent[0].body.Contains("chat_template_kwargs"), "settings changed: tried again");
         }
         finally { LingClient.Spacing = old; }
+    }
+
+    // 语音和文字只发给你的服务 (issue #15; the Mac's GoogleOffTests): Google is never asked.
+
+    public static void CustomOnlyActsWithTheCustomServiceAlone()
+    {
+        var s = new AppSettings { AiProvider = "custom", AiCustomOnly = true };
+        Check(s.GoogleOff, "on with the custom service");
+        s.AiProvider = "zenmux";
+        Check(!s.GoogleOff && s.AiCustomOnly, "kept but inert with another service");
+        Check(Json.Write(new AppSettings { AiCustomOnly = true }).Contains("\"aiCustomOnly\": true"), "the Mac's key");
+        Check(Json.Read<AppSettings>("{\"aiCustomOnly\":true}")!.AiCustomOnly, "read back");
+    }
+
+    public static async Task WithGoogleOffPartialTextGoesNowhere()
+    {
+        var google = new Service((_, _) => Status(200, "[[[\"周五\",\"Friday\"]]]"));
+        var service = new Service((_, _) => Reply("我们周五发布。"));
+        var (ling, _) = Using(service);
+        var t = new Translator(ling, google) { GoogleOff = true };
+        for (var i = 0; i < 3; i++) Equal(null, await t.Translate("We ship on Friday", "en", "zh-CN", Translator.Kind.Draft), "the original shows");
+        Check(google.Sent.Count == 0 && service.Sent.Count == 0, "neither Google nor the service sees a draft");
+        Check(!t.SentencesUntranslated, "a draft says nothing about sentences");
+    }
+
+    public static async Task WithGoogleOffSentencesGoToTheServiceOnly()
+    {
+        var old = LingClient.Spacing; LingClient.Spacing = 0;
+        try
+        {
+            var google = new Service((_, _) => Status(200, "[[[\"谷歌的译文\",\"x\"]]]"));
+            var up = false;
+            var service = new Service((_, _) => up ? Reply("我们周五发布。") : Status(400, "{\"error\":{\"message\":\"bad\"}}"));
+            var (ling, _) = Using(service);
+            var t = new Translator(ling, google) { GoogleOff = true };
+            var changes = 0;
+            t.Changed += () => changes++;
+            Equal(null, await t.Translate("We ship on Friday.", "en", "zh-CN", Translator.Kind.Sentence), "the service failed: the original only");
+            Check(service.Sent.Count > 0, "the service was asked");
+            Equal(0, google.Sent.Count, "Google never was");
+            Check(t.SentencesUntranslated && changes == 1, "the notes window is told");
+            up = true;
+            Equal("我们周五发布。", await t.Translate("We ship on Friday.", "en", "zh-CN", Translator.Kind.Sentence), "the service answers again");
+            Check(!t.SentencesUntranslated && changes == 2, "and the notice goes");
+            Equal(0, google.Sent.Count, "still no Google");
+
+            // Off again: Google stands in as before.
+            t.GoogleOff = false;
+            up = false;
+            Equal("谷歌的译文", await t.Translate("We ship on Friday.", "en", "zh-CN", Translator.Kind.Sentence), "Google once more");
+            Equal(1, google.Sent.Count, "one request to Google");
+        }
+        finally { LingClient.Spacing = old; }
+    }
+
+    public static async Task FlippingGoogleOffClearsAGoogleBackoff()
+    {
+        var google = new Service((_, _) => Status(429));
+        var (ling, _) = Using(new Service((_, _) => Reply("x")), key: null);
+        var t = new Translator(ling, google);
+        Equal(null, await t.Translate("Hello", "en", "zh-CN", Translator.Kind.Draft), "rate-limited");
+        Equal(null, await t.Translate("Hello", "en", "zh-CN", Translator.Kind.Draft), "backing off");
+        Equal(1, google.Sent.Count, "the second waits out the backoff");
+        t.GoogleOff = true;
+        t.GoogleOff = false;
+        await t.Translate("Hello", "en", "zh-CN", Translator.Kind.Draft);
+        Equal(2, google.Sent.Count, "the backoff went with the flip");
     }
 
     public static async Task AHearServerRefusingKwargsLeavesTheTextServerAlone()

@@ -106,3 +106,29 @@ import Testing
         #expect(!g.open(t.addingTimeInterval(5)) && g.open(t.addingTimeInterval(10)) && !g.down)
     }
 }
+
+/// 语音和文字只发给你的服务 (issue #15): Google is never asked, and nothing says it can't be reached.
+@MainActor @Suite struct GoogleOffTests {
+    @Test func partialLinesShowTheOriginalWithoutAskingGoogle() async {
+        let t = TranslationService(ling: LingClient())
+        t.googleOff = true
+        var drafts = 0
+        t.onDraft = { _, _ in drafts += 1 }
+        // Were Google asked, this would count failures and mark it down.
+        t.simulateGoogleDown = true
+        for _ in 0..<3 { #expect(await t.translate("We ship on Friday", source: "en-US", target: "zh-CN", kind: .draft) == nil) }
+        #expect(drafts == 0)
+        #expect(!t.health.googleDown && t.health.googleOff)
+    }
+
+    @Test func turningItOnClearsAStaleGoogleDown() async {
+        let t = TranslationService(ling: LingClient())
+        t.simulateGoogleDown = true
+        for _ in 0..<GoogleHealth.downAfter { _ = await t.translate("Hello", source: "en-US", target: "zh-CN", kind: .draft) }
+        #expect(t.health.googleDown)
+        t.googleOff = true
+        #expect(t.health == TranslationHealth(googleOff: true))
+        t.googleOff = false
+        #expect(t.health == TranslationHealth())
+    }
+}

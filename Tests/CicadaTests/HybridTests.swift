@@ -40,6 +40,90 @@ import Testing
         #expect(g.closed(now: 100.3))
         #expect(!g.closed(now: 100 + EchoGate.hang + 0.01))
     }
+
+    /// The Mac loud every 0.1 s from `from` to `to`, words every second when `words`, and the room
+    /// mic at `during` while it plays and at `quiet` for as long again afterwards.
+    private func play(_ g: EchoGate, from: Double, to: Double, words: Bool, during: Float, quiet: Float) {
+        var t = from
+        while t < to {
+            g.hold(now: t)
+            if words, Int(t * 10) % 10 == 0 { g.heardWords(now: t) }
+            g.roomLevel(during, seconds: 0.1, now: t + 0.05)
+            t += 0.1
+        }
+        let end = t
+        while t < end + (to - from) + 2 {
+            g.roomLevel(quiet, seconds: 0.1, now: t)
+            t += 0.1
+        }
+    }
+
+    @Test func musicStopsClosingTheGate() {
+        let g = EchoGate()
+        var t = 0.0
+        while t < 3 { g.hold(now: t); t += 0.1 }
+        // Three seconds without words: still taken for speech that hasn't been recognized yet.
+        g.hold(now: 3.0)
+        #expect(g.closed(now: 3.1))
+        // Five: music. The room is heard over it.
+        while t < 5 { g.hold(now: t); t += 0.1 }
+        g.hold(now: 5)
+        #expect(g.playingMusic(now: 5))
+        #expect(!g.closed(now: 5 + EchoGate.hang + 0.01))
+        // Someone starts talking over it: words close it again.
+        g.heardWords(now: 5.5)
+        g.hold(now: 5.6)
+        #expect(g.closed(now: 5.7))
+    }
+
+    @Test func speechKeepsTheGateClosedThroughALongSentence() {
+        let g = EchoGate()
+        var t = 0.0
+        while t < 10 { g.hold(now: t); if Int(t * 10) % 10 == 0 { g.heardWords(now: t) }; t += 0.1 }
+        #expect(!g.playingMusic(now: 10))
+        #expect(g.closed(now: 10))
+    }
+
+    @Test func noEchoMeasuredOpensTheGate() {
+        let g = EchoGate()
+        #expect(g.echo)
+        // Headphones: the room mic stays at its floor while the Mac speaks.
+        play(g, from: 0, to: 6, words: true, during: 0.001, quiet: 0.001)
+        #expect(!g.echo)
+        g.hold(now: 20)
+        #expect(!g.closed(now: 20.1))
+    }
+
+    @Test func speakersReachingTheMicKeepTheGate() {
+        let g = EchoGate()
+        play(g, from: 0, to: 6, words: true, during: 0.03, quiet: 0.001)
+        #expect(g.echo)
+        g.hold(now: 20)
+        #expect(g.closed(now: 20.1))
+    }
+
+    @Test func echoComesBackWhenTheHeadphonesComeOff() {
+        let g = EchoGate()
+        play(g, from: 0, to: 6, words: true, during: 0.001, quiet: 0.001)
+        #expect(!g.echo)
+        play(g, from: 20, to: 45, words: true, during: 0.03, quiet: 0.001)
+        #expect(g.echo)
+    }
+
+    @Test func aResetAssumesEchoAgain() {
+        let g = EchoGate()
+        play(g, from: 0, to: 6, words: true, during: 0.001, quiet: 0.001)
+        #expect(!g.echo)
+        g.reset()
+        #expect(g.echo)
+        g.hold(now: 50)
+        #expect(g.closed(now: 50.1))
+    }
+
+    @Test func notEnoughToTellKeepsTheEcho() {
+        #expect(EchoGate.ratio(during: [(0.001, 1)], quiet: [(0.001, 10)]) == nil)
+        #expect(EchoGate.ratio(during: [(0.001, 5)], quiet: [(0.001, 1)]) == nil)
+    }
 }
 
 @Suite struct VoiceGateBlockTests {

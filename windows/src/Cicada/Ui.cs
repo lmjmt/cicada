@@ -31,6 +31,10 @@ static class Palette
     public static readonly SolidColorBrush AccentFill = B(0xC9441D);
     public static readonly SolidColorBrush AccentPale = B(0xFDEBE4);
     public static readonly SolidColorBrush AccentText = B(0xA8370F);
+    /// 回放: a line's time as a link, the line at the playhead, and the player bar's box.
+    public static readonly SolidColorBrush TimeLink = B(0xB33B14);
+    public static readonly SolidColorBrush Playing = B(0xFDEEE7);
+    public static readonly SolidColorBrush PlayerFill = B(0xF5F6F8);
     public static readonly SolidColorBrush Success = B(0x0F7B3F);
     public static readonly SolidColorBrush Danger = B(0xC42B1C);
     public static readonly SolidColorBrush ErrorBg = B(0xFDECEA);
@@ -64,6 +68,7 @@ static class Icons
     public const string Notes = "M5.5,2.5 H11.5 L15,6 V17.5 H5.5 Z M11.5,2.5 V6 H15 M8,10 H13 M8,13 H13";
     public const string Stop = "M6.5,4 H13.5 A2.5,2.5 0 0 1 16,6.5 V13.5 A2.5,2.5 0 0 1 13.5,16 H6.5 A2.5,2.5 0 0 1 4,13.5 V6.5 A2.5,2.5 0 0 1 6.5,4 Z";
     public const string Play = "M6.5,4.5 L15.5,10 L6.5,15.5 Z";
+    public const string Pause = "M6,4.5 H8.8 V15.5 H6 Z M11.2,4.5 H14 V15.5 H11.2 Z";
     public const string Gear = "M12.5,10 A2.5,2.5 0 1 1 7.5,10 A2.5,2.5 0 1 1 12.5,10 Z M10,2.5 V4.5 M10,15.5 V17.5 M2.5,10 H4.5 M15.5,10 H17.5 M4.7,4.7 L6.1,6.1 M13.9,13.9 L15.3,15.3 M4.7,15.3 L6.1,13.9 M13.9,6.1 L15.3,4.7";
     public const string Search = "M14.5,9 A5.5,5.5 0 1 1 3.5,9 A5.5,5.5 0 1 1 14.5,9 Z M13,13 L17,17";
     public const string Export = "M10,3 V13 M6,7 L10,3 L14,7 M4,12 V16.5 H16 V12";

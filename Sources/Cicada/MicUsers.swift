@@ -27,9 +27,11 @@ struct MicUser: Identifiable, Equatable {
 enum MicUsers {
     /// Dedicated meeting apps: listed while running, even when idle. Browsers and chat apps are
     /// listed only while they read a microphone, or the list would always show them.
+    /// 飞书 is `com.electron.lark`; Lark, its international edition, has an id of its own.
     static let meetingApps: Set<String> = [
         "us.zoom.xos", "com.tencent.meeting", "com.microsoft.teams2", "com.microsoft.teams",
-        "com.electron.lark", "com.bytedance.lark", "com.larksuite.larkApp", "com.alibaba.DingTalkMac", "Cisco-Systems.Spark",
+        "com.electron.lark", "com.bytedance.lark", "com.larksuite.larkApp", "com.alibaba.DingTalkMac",
+        "com.tencent.WeWorkMac", "Cisco-Systems.Spark", "com.webex.meetingmanager",
     ]
 
     /// One audio-reading process: its bundle id and the input devices it has open.

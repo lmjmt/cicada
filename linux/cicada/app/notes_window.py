@@ -312,71 +312,24 @@ class NotesWindow(Gtk.Window):
         self._fill_source()
 
     def _fill_source(self) -> None:
+        """麦克风 under the header (the Mac's 打开麦克风 beside 结束: here the header's mic icon is
+        同声传译's): what the mic does now, and the button that turns it on or off."""
         row = self.source_row
         ui.clear(row)
         listen = self.app.listen
         if not listen.listening or listen.source_kind == "file" or self.subtitles:
-            self.source_open = False
             row.hide()
             return
-        from .tray import sources
-        names = dict(sources())
-        line = ui.hbox(6, ui.text(names.get(self.app.settings.listenSource, ""), 12, "secondary", wrap=False))
-        change = ui.link(L("换") + (" ⌃" if self.source_open else " ⌄"), self._toggle_sources)
-        change.set_can_focus(False)
-        line.pack_start(change, False, False, 0)
+        on = self.app.mic_on
+        line = ui.hbox(8, ui.text(L("桌边的人说话也会记下") if on else L("关着 · 只听电脑声音"), 12, "secondary", wrap=False))
+        b = ui.button(L("关闭麦克风") if on else L("打开麦克风"), lambda: self.app.set_mic(not on),
+                      "outline" if on else "darkbtn", "audio-input-microphone-symbolic")
+        b.set_can_focus(False)
+        line.pack_end(b, False, False, 0)
         row.pack_start(line, False, False, 0)
-        if self.source_open:
-            row.pack_start(self._source_choices(), False, False, 0)
-        # How the room is heard when it isn't the plain way (one grey line, the Mac's HybridNote).
-        note = self.app.hybrid_note()
-        if note:
-            row.pack_start(ui.text(note, 11, "tertiary", width_chars=40), False, False, 0)
-        # 线上也有人？: only the room is heard while a meeting app here is in a call.
-        app_name = self.app.online_prompt
-        if app_name:
-            strip = ui.vbox(8, ui.vbox(2, ui.text(L("线上也有人？"), 13, "ink", bold=True, wrap=False),
-                                       ui.text(LF("%@ 正在通话", app_name), 12, "secondary", wrap=False)))
-            buttons = ui.hbox(8, ui.button(L("也听电脑"), lambda: self.app.answer_online(True), "darkbtn"),
-                              ui.button(L("不用"), lambda: self.app.answer_online(False), "outline"))
-            for b in buttons.get_children():
-                b.set_can_focus(False)
-            strip.pack_start(buttons, False, False, 0)
-            row.pack_start(ui.gap(ui.panel(ui.pad(strip, 12, 14), "endingstrip"), 4), False, False, 0)
         for c in row.get_children():
             c.show_all()
         row.show()  # show_all() skips a no_show_all widget itself
-
-    source_open = False
-
-    def _toggle_sources(self, on: bool | None = None) -> None:
-        self.source_open = (not self.source_open) if on is None else on
-        self._fill_source()
-
-    def _source_choices(self) -> Gtk.Widget:
-        """听哪里's choices in place, under 换 (as the meeting's language card): a Gtk.Menu popped from
-        this window, which never takes the focus, came up blank and stopped the app taking input."""
-        from .tray import sources
-        box = ui.vbox(0)
-        for value, label in sources():
-            def pick(v=value):
-                self.source_open = False
-                if v == self.app.settings.listenSource:
-                    self._fill_source()
-                else:
-                    self.app.set_listen_source(v)
-            b = Gtk.Button()
-            current = value == self.app.settings.listenSource
-            inner = ui.hbox(8, ui.text(label, 13, "ink", bold=current, wrap=False))
-            if current:
-                tick = ui.icon("object-select-symbolic", 12)
-                inner.pack_end(tick, False, False, 0)
-            b.add(ui.pad(inner, 7, 12))
-            ui.classes(b, "linkrow")
-            b.set_can_focus(False)
-            b.connect("clicked", lambda *_, f=pick: f())
-            box.pack_start(b, False, False, 0)
-        return ui.panel(ui.pad(box, 4, 0), "notice")
 
     # 纪要 / 文字记录, side by side
 
@@ -911,6 +864,12 @@ class NotesWindow(Gtk.Window):
             row.pack_end(b, False, False, 0)
             body.pack_start(ui.pad(ui.panel(ui.pad(row, 12), "notice", "error"), 0, 0, 10, 0), False, False, 0)
             return
+        elif live and self.app.translator.google_off and self.app.translator.sentences_untranslated:
+            # 语音和文字只发给你的服务, and the service didn't translate the last sentence: it picks up
+            # by itself, and no 改用 Ling, which would send the meeting elsewhere.
+            notes_wait = status in (notesmod.UNREACHABLE, notesmod.UPDATING) and ling.check_result.reason == "unreachable"
+            tone = "waiting"
+            text = LF("译文和纪要等 %@ 恢复 · 字幕先显示原文", name) if notes_wait else LF("译文等 %@ 恢复 · 字幕先显示原文", name)
         elif status == notesmod.RATE_LIMITED and live:
             # A 429 holds hearing at the start gate and its retries wait it out: subtitles come late
             # for a moment, not lost; the live card says so if hearing itself stays busy.

@@ -23,8 +23,13 @@ public sealed class AppSettings
     [JsonPropertyName("aiCustomVoice")] public string AiCustomVoice { get; set; } = "";
     /// A custom service's hear model at its own address (the Mac's key); empty: the same one.
     [JsonPropertyName("aiCustomHearBase")] public string AiCustomHearBase { get; set; } = "";
-    /// 听哪里 (the Mac's key): "system" (电脑声音), "room" (会议室) or "both" (电脑和会议室).
-    [JsonPropertyName("listenSource")] public string ListenSourceValue { get; set; } = ListenSource.System;
+    /// 语音和文字只发给你的服务 (the Mac's key): with the custom service, Google Translate is never
+    /// asked. Kept when another service is picked, but only acts on the custom one (GoogleOff).
+    [JsonPropertyName("aiCustomOnly")] public bool AiCustomOnly { get; set; }
+    [JsonIgnore] public bool GoogleOff => AiProvider == "custom" && AiCustomOnly;
+    /// 打开麦克风: "both" while the mic is on, else "system" (the Mac's listenSource values; "room",
+    /// the mic alone, is the Mac's on macOS 14/15). Not saved: every launch starts with the mic off.
+    [JsonIgnore] public string ListenSourceValue { get; set; } = ListenSource.System;
     [JsonIgnore] public string Listens => ListenSource.Parse(ListenSourceValue);
     [JsonIgnore] public bool ListensToRoom => Listens == ListenSource.Room;
     [JsonIgnore] public bool HearsBoth => Listens == ListenSource.Both;
@@ -42,6 +47,8 @@ public sealed class AppSettings
     [JsonPropertyName("uiLanguage")] public string UiLanguage { get; set; } = "system";
     /// 字幕文字大小, in px.
     [JsonPropertyName("subtitleSize")] public int SubtitleSize { get; set; } = 24;
+    /// 保存会议录音 (the Mac's key): keep what was heard as system.m4a in the meeting's folder.
+    [JsonPropertyName("recordAudio")] public bool RecordAudio { get; set; } = true;
     /// 说话人识别: tell the other side's voices apart (on by default, as on the Mac).
     [JsonPropertyName("speakerVoices")] public bool SpeakerVoices { get; set; } = true;
     /// 同声传译: hold right Ctrl to speak into the meeting in its language.

@@ -100,8 +100,15 @@ class Shape(unittest.TestCase):
         self.assertTrue(r.slow)
         self.assertIn("4.2", r.slow_line())
         self.assertIn("思考", r.slow_line())
+        self.assertIn("Google", r.slow_line())
+        # 语音和文字只发给你的服务: no Google to fall back on, the sentence is given up on.
+        self.assertNotIn("Google", r.slow_line(google_off=True))
+        self.assertIn("不等它了", r.slow_line(google_off=True))
+        self.assertIn("思考", r.slow_line(google_off=True))
         r.translate = aicheck.Speed(3.5, False)
         self.assertNotIn("思考", r.slow_line())
+        self.assertIn("不等它了", r.slow_line(google_off=True))
+        self.assertNotIn("思考", r.slow_line(google_off=True))
         r.translate = aicheck.Speed(0.5, False)
         self.assertIsNone(r.slow_line())
         self.assertIn("translate=0.5s", r.summary())
@@ -249,6 +256,96 @@ class HearAddress(Base):
         ling.check()
         self.assertEqual(("hear", aicheck.BAD_ADDRESS, None), ling.check_result.failure)
         self.assertFalse(any("input_audio" in b for _u, b in fake.sent))
+
+
+class StubLing:
+    """The service, for the translator alone: answers each sentence, or fails."""
+
+    def __init__(self, answer=None):
+        self.usable = True
+        self.answer = answer  # None: the service can't be reached
+        self.asked = []
+        self.check_result = aicheck.AICheck()  # not checked yet: every sentence is tried
+
+    def chat(self, prompt, user, priority, **kw):
+        self.asked.append(prompt)
+        if self.answer is None:
+            raise LingError("unreachable")
+        return self.answer
+
+
+GOOGLE = Response(200, '[[["周五发布。","We ship on Friday",null,null,1]]]')
+
+
+class GoogleOff(unittest.TestCase):
+    """语音和文字只发给你的服务 (issue #15, TranslatorTests.swift › GoogleOffTests): Google is never asked."""
+
+    def translator(self, ling, google=GOOGLE):
+        from cicada.core.translator import Translator
+        fake = Fake(lambda u, b: google)
+        return Translator(ling, transport=fake), fake
+
+    def test_partial_lines_show_the_original_without_asking_anyone(self):
+        from cicada.core.translator import Translator
+        ling = StubLing("周五发布。")
+        t, fake = self.translator(ling)
+        t.google_off = True
+        for _ in range(3):
+            self.assertIsNone(t.translate("We ship on Friday", "en", "zh-CN", Translator.DRAFT))
+        self.assertEqual([], fake.sent)
+        self.assertEqual([], ling.asked)  # partial text never goes to the AI service either
+        self.assertFalse(t.sentences_untranslated)
+
+    def test_finished_sentences_go_to_the_service_only(self):
+        from cicada.core.translator import Translator
+        ling = StubLing("周五发布。")
+        t, fake = self.translator(ling)
+        t.google_off = True
+        self.assertEqual("周五发布。", t.translate("We ship on Friday", "en", "zh-CN", Translator.SENTENCE))
+        self.assertFalse(t.sentences_untranslated)
+        ling.answer = None
+        self.assertIsNone(t.translate("We ship on Friday", "en", "zh-CN", Translator.SENTENCE))
+        self.assertTrue(t.sentences_untranslated)
+        self.assertEqual([], fake.sent)
+
+    def test_off_google_still_stands_in(self):
+        from cicada.core.translator import Translator
+        t, fake = self.translator(StubLing(None))
+        self.assertEqual("周五发布。", t.translate("We ship on Friday", "en", "zh-CN", Translator.SENTENCE))
+        self.assertEqual("周五发布。", t.translate("We ship on Friday", "en", "zh-CN", Translator.DRAFT))
+        self.assertEqual(2, len(fake.sent))
+
+    def test_flipping_it_clears_a_stale_google_backoff(self):
+        from cicada.core.translator import Translator
+        t, fake = self.translator(StubLing(None), google=Response(429, ""))
+        self.assertIsNone(t.translate("Hello", "en", "zh-CN", Translator.DRAFT))
+        self.assertGreater(t._google_backoff_until, 0)
+        t.google_off = True
+        self.assertEqual(0.0, t._google_backoff_until)
+        t.translate("Hello", "en", "zh-CN", Translator.SENTENCE)
+        self.assertTrue(t.sentences_untranslated)
+        t.google_off = False
+        self.assertFalse(t.sentences_untranslated)
+        fake.respond = lambda u, b: GOOGLE
+        self.assertEqual("周五发布。", t.translate("Hello", "en", "zh-CN", Translator.DRAFT))
+
+    def test_only_with_the_custom_service(self):
+        s = AppSettings(aiProvider="custom", aiCustomOnly=True, **custom())
+        self.assertTrue(s.google_off)
+        s.aiProvider = "ling"
+        self.assertFalse(s.google_off)  # kept, but inert
+        self.assertTrue(s.aiCustomOnly)
+        self.assertFalse(AppSettings(aiProvider="custom", **custom()).google_off)
+
+    def test_the_footnote_names_one_host_only_when_every_use_shares_it(self):
+        s = AppSettings(aiProvider="custom", **custom())
+        self.assertEqual("192.168.1.20", providers.only_host(s.ai_config()))
+        s.aiCustomHearBase = "http://192.168.1.30:8000/v1"
+        self.assertIsNone(providers.only_host(s.ai_config()))
+        s.aiCustomHearBase = ""
+        s.aiVoiceModels = {"custom": "qwen3-tts"}
+        s.aiCustomVoiceBase = "http://192.168.1.40:8000/v1"
+        self.assertIsNone(providers.only_host(s.ai_config()))
 
 
 if __name__ == "__main__":

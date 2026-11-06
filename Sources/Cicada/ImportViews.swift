@@ -1,29 +1,39 @@
 import AVFoundation
 import SwiftUI
 
-/// Plays an imported record's original file, for the player bar and a click on a line's time.
+/// Plays a record's audio, for the player bar and a click on a line's time: an imported record's
+/// original file, or a meeting's own system.m4a.
 @MainActor
 final class RecordingPlayer: ObservableObject {
     @Published private(set) var sessionID: String?
     @Published private(set) var playing = false
     @Published private(set) var time = 0.0
     @Published private(set) var length = 0.0
-    /// The file was moved or deleted since it was imported.
+    /// The file was moved or deleted since it was imported (or since the meeting was recorded).
     @Published private(set) var missing = false
+    /// The meeting's own recording rather than an imported file: 找不到录音, not 找不到原文件.
+    @Published private(set) var own = false
     @Published private(set) var rate: Float = 1
     private var player: AVPlayer?
     private var observer: Any?
 
     var ready: Bool { player != nil }
 
-    func load(_ s: Session?) {
-        guard s?.id != sessionID else { return }
+    /// `recording`: the meeting's system.m4a, for a record that has no original file.
+    func load(_ s: Session?, recording: URL? = nil) {
+        // The same record again only while its recording was still being rewrapped.
+        if let s, s.id == sessionID, player != nil || missing { return }
         unload()
-        guard let s, let path = s.sourcePath else { return }
+        guard let s, let url = s.sourcePath.map({ URL(fileURLWithPath: $0) }) ?? recording else { return }
         sessionID = s.id
+        own = s.sourcePath == nil
         length = s.duration
-        guard FileManager.default.fileExists(atPath: path) else { missing = true; return }
-        let p = AVPlayer(url: URL(fileURLWithPath: path))
+        guard FileManager.default.fileExists(atPath: url.path) else {
+            // Right after a meeting only the partial file is there until the rewrap ends: not missing yet.
+            missing = !(own && FileManager.default.fileExists(atPath: AudioFileWriter.partial(url).path))
+            return
+        }
+        let p = AVPlayer(url: url)
         player = p
         observer = p.addPeriodicTimeObserver(forInterval: CMTime(value: 1, timescale: 4), queue: .main) { [weak self] t in
             MainActor.assumeIsolated {
@@ -35,6 +45,12 @@ final class RecordingPlayer: ObservableObject {
         }
     }
 
+    /// The line the playhead is in, once playing has begun.
+    func lineID(in s: Session) -> String? {
+        guard s.id == sessionID, ready, playing || time > 0 else { return nil }
+        return s.lines.last(where: { $0.t <= time + 0.2 })?.id
+    }
+
     func unload() {
         if let observer { player?.removeTimeObserver(observer) }
         player?.pause()
@@ -43,6 +59,7 @@ final class RecordingPlayer: ObservableObject {
         sessionID = nil
         playing = false
         missing = false
+        own = false
         time = 0
     }
 
@@ -211,7 +228,7 @@ struct RecordingPlayerBar: View {
 
     var body: some View {
         if player.missing {
-            Text("找不到原文件，没法播放").font(.system(size: 12)).foregroundStyle(Palette.secondary)
+            Text(player.own ? L("找不到录音，没法播放") : L("找不到原文件，没法播放")).font(.system(size: 12)).foregroundStyle(Palette.secondary)
         } else if player.ready {
             HStack(spacing: 12) {
                 Button { player.toggle() } label: {
@@ -236,6 +253,8 @@ struct RecordingPlayerBar: View {
                 }
                 .buttonStyle(.plain).help(L("播放速度"))
             }
+            .padding(.leading, 8).padding(.trailing, 12).padding(.vertical, 8)
+            .background(RoundedRectangle(cornerRadius: 12).fill(Palette.raised))
         }
     }
 }

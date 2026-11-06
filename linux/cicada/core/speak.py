@@ -13,6 +13,7 @@ back. UI-free like ListenEngine: on_change is called on worker threads."""
 from __future__ import annotations
 
 import queue
+import re
 import threading
 import time
 from collections import deque
@@ -202,6 +203,10 @@ class SpeakEngine:
             Log.d("speak: segment %d %.1fs not interpreted, not spoken" % (seg.index, seg.seconds))
             return None
         original, translation = heard
+        if filler(original):
+            # The room's hush or an echo's tail cut as a segment: Ming hears 嗯, the room would hear "Hmm."
+            Log.d("speak: segment %d only a filler, not spoken" % seg.index)
+            return None
         # The voice starts now, on its own thread: ready the moment the sentence before stops playing,
         # instead of each sentence waiting out Ming's first chunk after the last one's playback.
         return original, translation, source, target, end, self._fetch(translation, target)
@@ -274,3 +279,13 @@ class SpeakEngine:
         t = round(max(0.0, (datetime.now(timezone.utc) - s.startedAt).total_seconds() - ago), 3)
         self.store.append(sid, TranscriptLine(id="m%d" % self._me, t=t, speaker="me", src=original, dst=translation,
                                               srcLang=source, dstLang=target))
+
+
+FILLERS = {"嗯", "啊", "呃", "哦", "唔", "额", "噢", "哎", "um", "uh", "hmm", "hm", "mm", "mhm", "ah", "oh", "er", "えー", "あの", "음", "어"}
+
+
+def filler(text: str) -> bool:
+    """Nothing but fillers (嗯, 啊, um, hmm…), whatever the punctuation (the Mac's PressSpeech.filler)."""
+    words = [w for w in re.split(r"[^\w]+|[\d_]+", text.lower()) if w]
+    return not words or all(w in FILLERS or (len(w) > 1 and len(set(w)) == 1 and w[0] in FILLERS) for w in words)
+

@@ -16,6 +16,9 @@ public sealed class SessionStore
     /// The moment recognised words land in a record: a new line (theirs or mine) or a half sentence
     /// that grew. What 结束会议 counts as someone speaking (MeetingEndWatch.Heard).
     public event Action<string>? Words;
+    /// The app's audio encoder (Media Foundation); null where there is none (the Mac CLI, tests
+    /// that don't set one): meetings are then kept without a recording.
+    public IAudioFiles? Audio { get; set; }
 
     public SessionStore() { Load(); }
 
@@ -120,17 +123,64 @@ public sealed class SessionStore
 
     /// The meeting ended (at `endedAt` when it ended by itself a while ago): kept if anything was
     /// said, removed otherwise.
+    /// The meeting's recording, if any, is closed by then (ListenEngine.Stop): it is rewrapped into
+    /// system.m4a in the background, cut at `endedAt` when the meeting ended by itself a while ago
+    /// (its silent tail), as SessionStore.swift › end does.
     public void End(string id, DateTimeOffset? endedAt = null)
     {
         bool empty;
+        double? until = null;
         lock (gate)
         {
             if (!sessions.TryGetValue(id, out var s)) return;
             s.EndedAt = endedAt is { } at ? (at > s.StartedAt ? at : s.StartedAt) : DateTimeOffset.Now;
             empty = s.Lines.Count == 0;
+            var m4a = Recording.SystemAudio(id);
+            s.HasAudio = File.Exists(m4a) || File.Exists(Recording.Partial(m4a));
+            if (endedAt is not null) until = s.Duration.TotalSeconds;
         }
-        if (empty) Delete(id);
-        else { MarkDirty(id); Flush(); }
+        if (empty) { Delete(id); return; }
+        MarkDirty(id); Flush();
+        _ = Task.Run(() => FinishAudio(id, until));
+    }
+
+    /// Recordings a meeting didn't get to close (the app was killed or the PC went off): the
+    /// partial file is rewrapped now, as SessionStore.swift › load does. Call once Audio is set.
+    public void FinishLeftovers(string? live = null)
+    {
+        List<string> left;
+        lock (gate) left = sessions.Keys.Where(id => id != live && File.Exists(Recording.Partial(Recording.SystemAudio(id)))).ToList();
+        foreach (var id in left)
+        {
+            Mutate(id, s => s.HasAudio = true);
+            _ = Task.Run(() => FinishAudio(id, null));
+        }
+    }
+
+    /// system.aac into system.m4a. A partial file beside an .m4a means the last rewrap was cut
+    /// short: it is done again. One that fails leaves the partial file for the next launch.
+    void FinishAudio(string id, double? until)
+    {
+        var m4a = Recording.SystemAudio(id);
+        var partial = Recording.Partial(m4a);
+        if (Audio is not { } audio || !File.Exists(partial)) return;
+        try
+        {
+            if (File.Exists(m4a)) File.Delete(m4a);
+            var started = DateTime.UtcNow;
+            if (audio.Rewrap(partial, m4a, until))
+            {
+                File.Delete(partial);
+                Log.Debug($"store: recording {id} finished in {(DateTime.UtcNow - started).TotalMilliseconds:F0} ms");
+            }
+            else
+            {
+                try { File.Delete(m4a); } catch { }
+                Log.Debug($"store: recording {id} rewrap failed");
+            }
+        }
+        catch (Exception e) { Log.Debug($"store: recording {id} rewrap failed {e.GetType().Name}"); }
+        Changed?.Invoke(id);
     }
 
     public void Delete(string id)

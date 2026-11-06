@@ -39,6 +39,19 @@ import Testing
         #expect(users == [MicUser(bundleID: "com.google.Chrome", name: "Google Chrome", state: .virtualMic)])
     }
 
+    @Test func larkWeComAndWebexMeetingsAreCalls() {
+        let calls = MicUsers.calls(
+            readers: [.init(bundleID: "com.larksuite.larkApp.helper", inputs: [builtIn]),
+                      .init(bundleID: "com.tencent.WeWorkMac", inputs: [builtIn]),
+                      .init(bundleID: "com.webex.meetingmanager", inputs: [builtIn]),
+                      .init(bundleID: "com.tencent.xinWeChat", inputs: [builtIn])],
+            running: ["com.larksuite.larkApp": "Lark", "com.tencent.WeWorkMac": "企业微信",
+                      "com.webex.meetingmanager": "Webex Meetings", "com.tencent.xinWeChat": "微信"])
+        // 微信 reads the mic for a voice message too: that isn't a call.
+        #expect(calls == ["com.larksuite.larkApp": "Lark", "com.tencent.WeWorkMac": "企业微信",
+                          "com.webex.meetingmanager": "Webex Meetings"])
+    }
+
     @Test func applesOwnMicReadersAreNotMeetings() {
         let users = MicUsers.merge(
             readers: [.init(bundleID: "com.apple.Sound-Settings.extension", inputs: [builtIn]),

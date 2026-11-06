@@ -74,6 +74,8 @@ struct GoogleHealth {
 /// finished sentences are going untranslated too (no key, and no on-device model to stand in).
 struct TranslationHealth: Equatable {
     var googleDown = false
+    /// 语音和文字只发给你的服务: Google is left out on purpose, so nothing says it can't be reached.
+    var googleOff = false
     var sentencesUntranslated = false
     var proxy: AICheck.ProxyHint?
 }
@@ -117,6 +119,16 @@ final class TranslationService {
     /// Debug (`googleDown:on`): Google fails as if there were no proxy, without touching the network.
     var simulateGoogleDown = false
 
+    /// Set by the app (语音和文字只发给你的服务, custom service only): Google is never asked, so the
+    /// text stays with the user's service and this Mac. A stale "can't reach Google" goes with it.
+    var googleOff = false {
+        didSet {
+            guard googleOff != oldValue else { return }
+            google = GoogleHealth()
+            health = TranslationHealth(googleOff: googleOff)
+        }
+    }
+
     func networkChanged() { google.networkChanged() }
 
     private func googleAnswered() {
@@ -147,6 +159,8 @@ final class TranslationService {
 
     func translate(_ text: String, source: String, target: String, kind: Kind, trace: TranslateTrace? = nil) async -> String? {
         if source == target { return text }
+        // Partial text only ever goes to Google: left out, it shows the original until the sentence ends.
+        if kind == .draft, googleOff { return nil }
         if kind == .draft, let onDraft {
             let started = Date()
             let out = await chain(text, source: source, target: target, kind: kind, trace: trace)
@@ -174,7 +188,9 @@ final class TranslationService {
                 return out
             }
         }
-        if google.open() {
+        if googleOff {
+            // Left out on purpose: no attempt in the trace, so diagnostics don't show Google failing.
+        } else if google.open() {
             let started = Date()
             do {
                 if simulateGoogleDown { throw URLError(.cannotConnectToHost) }

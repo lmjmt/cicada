@@ -31,6 +31,16 @@ enum SystemAudioPermission {
 final class SystemAudioTap {
     /// Called on the real-time audio thread. Must not block.
     var onAudio: ((AVAudioPCMBuffer) -> Void)?
+    /// Called on the main queue when the output device changes its sample rate. A Bluetooth headset
+    /// drops to 16 or 24 kHz when a meeting opens its mic: the tap's format no longer matches and it
+    /// hears nothing, so it must start again.
+    var onRateChange: (() -> Void)?
+    private var rateListener: (device: AudioObjectID, block: AudioObjectPropertyListenerBlock)?
+    private static let rateAddress = AudioObjectPropertyAddress(
+        mSelector: kAudioDevicePropertyNominalSampleRate,
+        mScope: kAudioObjectPropertyScopeGlobal,
+        mElement: kAudioObjectPropertyElementMain
+    )
 
     private var audioUnit: AudioUnit?
     private var tapID = AudioObjectID(kAudioObjectUnknown)
@@ -52,17 +62,12 @@ final class SystemAudioTap {
         return device
     }
 
-    static func defaultOutputSampleRate() -> Float64 {
-        guard let device = defaultOutputDevice() else { return 48_000 }
-        var rate: Float64 = 48_000
+    private static func sampleRate(_ device: AudioObjectID) -> Float64? {
+        var rate: Float64 = 0
         var size = UInt32(MemoryLayout<Float64>.size)
-        var addr = AudioObjectPropertyAddress(
-            mSelector: kAudioDevicePropertyNominalSampleRate,
-            mScope: kAudioObjectPropertyScopeGlobal,
-            mElement: kAudioObjectPropertyElementMain
-        )
+        var addr = rateAddress
         let status = AudioObjectGetPropertyData(device, &addr, 0, nil, &size, &rate)
-        return (status == noErr && rate > 0) ? rate : 48_000
+        return status == noErr && rate > 0 ? rate : nil
     }
 
     static func ownProcessObject() -> AudioObjectID? {
@@ -177,7 +182,18 @@ final class SystemAudioTap {
                                       &device, UInt32(MemoryLayout<AudioObjectID>.size))
         guard status == noErr else { throw fail(Int(status), L("无法连接音频聚合设备（\(status)）")) }
 
-        let sampleRate = Self.defaultOutputSampleRate()
+        // Two rates. The unit can't convert on its input side, so the client format takes the rate
+        // the unit reports, or every render fails with -10863. But the samples come at the
+        // aggregate's rate, which the output device sets: a headset in a call runs it at 16 kHz while
+        // the unit still says 48, and read as 48 kHz those samples are a third of the speed and
+        // nothing is recognized. AudioRouter resamples from the aggregate's rate.
+        var hardware = AudioStreamBasicDescription()
+        var hardwareSize = UInt32(MemoryLayout<AudioStreamBasicDescription>.size)
+        let read = AudioUnitGetProperty(unit, kAudioUnitProperty_StreamFormat, kAudioUnitScope_Input, 1,
+                                        &hardware, &hardwareSize)
+        let sampleRate = read == noErr && hardware.mSampleRate > 0 ? hardware.mSampleRate : 48_000
+        let samplesRate = Self.sampleRate(aggregateID) ?? sampleRate
+        debugLog("audio tap: unit at \(Int(sampleRate)) Hz, samples at \(Int(samplesRate)) Hz")
         var asbd = AudioStreamBasicDescription(
             mSampleRate: sampleRate,
             mFormatID: kAudioFormatLinearPCM,
@@ -191,7 +207,7 @@ final class SystemAudioTap {
         )
         guard let clientFormat = AVAudioFormat(streamDescription: &asbd) else { throw fail(-3, L("无法创建音频格式")) }
         self.clientFormat = clientFormat
-        self.monoFormat = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: sampleRate, channels: 1, interleaved: false)
+        self.monoFormat = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: samplesRate, channels: 1, interleaved: false)
         // Pre-allocate so the real-time callback normally doesn't allocate.
         self.renderBuffer = AVAudioPCMBuffer(pcmFormat: clientFormat, frameCapacity: 4096)
 
@@ -225,6 +241,19 @@ final class SystemAudioTap {
         guard status == noErr else { throw fail(Int(status), L("无法初始化音频单元（\(status)）")) }
         status = AudioOutputUnitStart(unit)
         guard status == noErr else { throw fail(Int(status), L("无法启动音频采集（\(status)）")) }
+
+        if let output = Self.defaultOutputDevice() {
+            let was = Self.sampleRate(output) ?? 0
+            let block: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
+                guard let self, let now = Self.sampleRate(output), now != was else { return }
+                debugLog("audio tap: output rate \(Int(was)) → \(Int(now)) Hz, starting again")
+                self.onRateChange?()
+            }
+            var addr = Self.rateAddress
+            if AudioObjectAddPropertyListenerBlock(output, &addr, .main, block) == noErr {
+                rateListener = (output, block)
+            }
+        }
     }
 
     private func render(timestamp: UnsafePointer<AudioTimeStamp>, bus: UInt32, frames: UInt32) -> OSStatus {
@@ -258,6 +287,11 @@ final class SystemAudioTap {
     }
 
     func stop() {
+        if let (device, block) = rateListener {
+            var addr = Self.rateAddress
+            AudioObjectRemovePropertyListenerBlock(device, &addr, .main, block)
+        }
+        rateListener = nil
         if let unit = audioUnit {
             AudioOutputUnitStop(unit)
             AudioUnitUninitialize(unit)

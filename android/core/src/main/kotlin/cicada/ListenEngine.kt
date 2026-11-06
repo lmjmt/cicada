@@ -209,7 +209,8 @@ class ListenEngine(
             for (b in mine) { b.copyInto(all, at); at += b.size }
             mine.clear(); all
         }
-        if (pcm.size < Segmenter.RATE / 2 || Wav.rms(pcm) < 0.003) {
+        // Spoken, not just loud enough: a silent press came back from the service as "嗯" and was said as "Hmm." (the Mac's PressSpeech).
+        if (pcm.size < Segmenter.RATE / 2 || !PressSpeech.spoken(pcm)) {
             sayProblem = if (pcm.size < Segmenter.RATE / 2) Strings.L("按住说完再松开") else Strings.L("没听到声音，靠近手机再说")
             changed(); return
         }
@@ -226,8 +227,9 @@ class ListenEngine(
         try {
             val heard = translator.hear(encode(pcm), their, me, pcm.size / Segmenter.RATE.toDouble())
             if (heard == null) { sayProblem = Strings.L("没听清，再说一次"); return }
+            if (PressSpeech.filler(heard.original)) { Log.d("listen: only a filler heard, not said"); return }
             var dst = heard.translation
-            if (dst == null && !Languages.same(heard.lang, their)) dst = translator.translate(heard.original, heard.lang, their, Translator.Kind.Sentence)
+            if (dst == null && !Languages.same(heard.lang, their)) dst = translator.translate(heard.original, heard.lang, their, Translator.Kind.Speak)
             val sameLanguage = Languages.same(heard.lang, their)
             val probe = TranscriptLine(speaker = "me", src = heard.original, dst = dst, srcLang = heard.lang, dstLang = their)
             val text = speakable(probe)
@@ -356,6 +358,8 @@ class ListenEngine(
             lastEnd = seg.start + seg.seconds
         }
         val copy = synchronized(gate) { line.copy() }
+        // A line the hear model translated itself: finished sentences are being translated again.
+        if (!joined && heard.translation != null) translator.sentencesUntranslated = false
         if (joined) store.replace(id, copy) else store.append(id, copy)
         onWords?.invoke()
 
@@ -364,6 +368,8 @@ class ListenEngine(
             val src = line.src
             pool.execute {
                 val dst = translator.translate(src, line.srcLang, target, Translator.Kind.Sentence)
+                // Untranslated: the live screens may now say why (translator.sentencesUntranslated).
+                if (dst == null) { changed(); return@execute }
                 val updated = synchronized(gate) {
                     if (dst == null || line.src != src) return@execute
                     line.dst = dst
@@ -431,3 +437,35 @@ class ListenEngine(
         }
     }
 }
+
+/** Whether anyone spoke during a hold (PressSpeech in the Mac's SpeakEngine.swift, same numbers):
+ *  0.3 s of 30 ms frames over three times the hold's own quiet (its quietest tenth), between
+ *  -44 and -36 dBFS. A silent hold came back from Ming as "嗯。" and went out as "Hmm."; a result
+ *  that is only fillers isn't said either. */
+object PressSpeech {
+    private const val FRAME = 480
+    private const val NEEDED = 0.3
+    private val fillers = setOf("嗯", "啊", "呃", "哦", "唔", "额", "噢", "哎", "um", "uh", "hmm", "hm", "mm", "mhm", "ah", "oh", "er", "えー", "あの", "음", "어")
+
+    fun spoken(pcm: ShortArray): Boolean {
+        if (pcm.size < FRAME) return false
+        val levels = ArrayList<Double>()
+        var i = 0
+        while (i + FRAME <= pcm.size) {
+            var sum = 0.0
+            for (k in i until i + FRAME) { val v = pcm[k] / 32768.0; sum += v * v }
+            levels.add(Math.sqrt(sum / FRAME))
+            i += FRAME
+        }
+        val floor = levels.sorted()[levels.size / 10]
+        val line = minOf(0.016, maxOf(0.0063, floor * 3))
+        return levels.count { it >= line } * FRAME / 16000.0 >= NEEDED
+    }
+
+    /** Nothing but fillers (嗯, 啊, um, hmm…), whatever the punctuation. */
+    fun filler(text: String): Boolean {
+        val words = text.lowercase().split(Regex("[^\\p{L}]+")).filter { it.isNotEmpty() }
+        return words.isEmpty() || words.all { w -> w in fillers || (w.length > 1 && w.toSet().size == 1 && w.substring(0, 1) in fillers) }
+    }
+}
+

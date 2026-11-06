@@ -1186,6 +1186,15 @@ class Speaking(Base):
         self.assertEqual(b"", player.data)
         self.assertIsNotNone(eng.problem)
 
+    def test_a_filler_alone_is_not_spoken(self):
+        # A hush or an echo's tail cut as a segment: Ming hears 嗯 and the room would hear "Hmm."
+        eng, fake, player = self._engine("ORIGINAL: 嗯。\nTRANSLATION: Hmm.")
+        self._say(eng, concat(tone(1.2), silence(1.0)))
+        self.assertEqual(0, eng.spoken)
+        self.assertEqual([], fake.spoken, "nothing sent to the voice")
+        from cicada.core.speak import filler
+        self.assertTrue(filler("嗯嗯。") and filler("Um, uh...") and not filler("嗯，好的。") and not filler("OK."))
+
     def test_fetches_the_next_voice_while_the_last_one_plays(self):
         eng, fake, player = self._engine("ORIGINAL: 你好\nTRANSLATION: Hello")
         fetched = []

@@ -75,6 +75,11 @@ class ListenEngine:
         self._listeners = []
         self.listening = False
         self.session_id = None
+        # 保存会议录音: `recorder(sid)` gives the meeting's recorder (write(samples), close(), finish(until))
+        # or None; set by the app when GStreamer can encode AAC. What the main lane hears is written,
+        # buffer for buffer, so the file's clock is the lines' clock (t counts the samples heard).
+        self.recorder = None
+        self._recording = None
         self.source_kind = None  # what this meeting is heard from ("system", "room", "file")
         self.problem = None  # the last error worth showing, cleared by the next good reply
         # What kind of problem, for a state the UI can draw: "key", "busy", "network", "source".
@@ -171,6 +176,11 @@ class ListenEngine:
         return [self._main] + ([self._room] if self._room is not None else [])
 
     @property
+    def recording(self) -> bool:
+        """This meeting is being recorded (保存会议录音 was on and AAC could be written when it began)."""
+        return self.listening and self._recording is not None
+
+    @property
     def hears_room_too(self) -> bool:
         """电脑和会议室: the room side is running."""
         return self._room is not None
@@ -194,6 +204,12 @@ class ListenEngine:
         self.notes.begin(session.id)
         if self.speakers is not None:
             self.speakers.reset()
+        self._recording = None
+        if self.recorder is not None:
+            try:
+                self._recording = self.recorder(session.id)
+            except Exception as e:  # noqa: BLE001 - a recording that can't start never stops listening
+                Log.d("listen: no recording (%s)" % type(e).__name__)
         # Listening before the source starts: a source that fails at once calls on_ended → stop(),
         # which must see this meeting as running to end it.
         self.listening = True
@@ -220,9 +236,15 @@ class ListenEngine:
                 if lane.muted:
                     # Silence rather than nothing keeps the segmenter's clock in step.
                     buf = array("h", bytes(len(buf) * 2))
+                rec = self._recording
+                if rec is not None and lane is self._main:
+                    rec.write(buf)
                 now = time.monotonic()
-                if lane is not self._main and self.gated and self.echo_gate.closed(now):
-                    buf = array("h", bytes(len(buf) * 2))
+                if lane is not self._main and self.gated:
+                    # What the mic really hears, for EchoGate's measurement, before any silencing.
+                    self.echo_gate.room_level(Wav.rms(buf), seconds, now)
+                    if self.echo_gate.closed(now):
+                        buf = array("h", bytes(len(buf) * 2))
                 level = Wav.rms(buf)
                 gate = lane.gate
                 if gate is not None:
@@ -279,6 +301,10 @@ class ListenEngine:
         hears silence while the computer plays speech."""
         if not self.listening or self._room is not None:
             return
+        # Another meeting may be another room or another output: echo is assumed until measured.
+        forced = self.echo_gate.forced
+        self.echo_gate = EchoGate()
+        self.echo_gate.forced = forced
         lane = _Lane(via="room", first=ROOM_IDS)
         lane.gate = VoiceGate(adaptive=True)
         lane.muted = any(l.muted for l in self._lanes())
@@ -323,9 +349,17 @@ class ListenEngine:
         self._room = None
         self.gated = False
         sid = self.session_id
+        rec, self._recording = self._recording, None
+        if rec is not None:
+            rec.close()  # every buffer the lane heard is in system.aac now
         if sid is None:
             return
         self.store.end(sid, ended_at)
+        s = self.store.get(sid)
+        if rec is not None and s is not None:
+            # Into system.m4a off this thread; a meeting that ended by itself loses its silent tail.
+            until = s.duration if ended_at is not None else None
+            self._pool.submit(rec.finish, until)
         Log.d("listen: stopped %s, %d lines" % (sid, self._line_count))
         self._changed()
         self._pool.submit(self.notes.finish)
@@ -420,6 +454,8 @@ class ListenEngine:
                 else:
                     self._record(lane, seg, heard)
                     self._heard_online(heard.original, seg.seconds)
+                    if heard.original.strip():  # speech, which the room mic is silenced for (EchoGate)
+                        self.echo_gate.heard_words(time.monotonic())
         if ready:
             self._changed()
 
@@ -543,8 +579,12 @@ class ListenEngine:
 
             def retranslate():
                 dst = self.translator.translate(src, line.srcLang, target, Translator.SENTENCE)
+                if dst is None:
+                    # The notes window may now say the user's own service can't be reached.
+                    self._changed()
+                    return
                 with self._gate:
-                    if dst is None or line.src != src:
+                    if line.src != src:
                         return
                     line.dst = dst
                     updated = line.copy()

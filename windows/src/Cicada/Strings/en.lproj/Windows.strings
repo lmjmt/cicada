@@ -157,7 +157,7 @@
 "好了，知了住在任务栏右下角" = "All set: Cicada lives at the bottom right of the taskbar";
 "Windows 会先把新图标收进 ^ 里。拖出来放在时钟旁边，开会时一眼就能看到。" = "Windows tucks new icons under ^ at first. Drag it out next to the clock so it's in sight during meetings.";
 "最大化" = "Maximize";
-"隐藏纪要窗" = "Hide notes window";
+"隐藏纪要窗" = "Hide notes";
 "退出知了" = "Quit Cicada";
 "知了还在任务栏右下角" = "Cicada is still in the taskbar corner";
 "关掉窗口不会退出，按 %@ 随时开始听。" = "Closing the window doesn't quit. Press %@ to start listening any time.";
@@ -317,3 +317,9 @@
 "本机和局域网服务可不填" = "Optional on this PC or your local network";
 "例如 kokoro" = "e.g. kokoro";
 "例如 af_heart" = "e.g. af_heart";
+/* The talk key: the computer was playing through the press, so what the mic heard may be its echo. */
+"对方在说话时说的，没有说出去" = "Said while they were talking, so not sent";
+"只存在这台电脑上" = "Stored only on this PC";
+/* 打开麦克风: the Mac's words name the Mac. */
+"关着 · 只听电脑声音" = "Off · PC audio only";
+"电脑声音照常在记" = "The PC's audio is still being recorded";

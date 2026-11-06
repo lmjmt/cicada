@@ -18,7 +18,11 @@ public sealed class ListenEngine
     readonly object gate = new();
 
     IAudioSource? source;
-    Channel<short[]>? audio;
+    Channel<(short[] buf, double at)>? audio;
+    /// When this side began (Stopwatch ticks): with `offset`, the meeting's clock.
+    long began;
+    /// 保存会议录音: the main side writes what it hears to the meeting's system.aac.
+    IAudioWriter? recorder;
     Task? worker;
     Segmenter? segmenter;
     readonly Dictionary<int, Heard?> done = [];
@@ -108,6 +112,8 @@ public sealed class ListenEngine
     /// 电脑和会议室: the main side holds the gate on loud audio and lists what it heard; the room
     /// side checks its lines against that before recording them.
     public EchoFilter? Echo { get; set; }
+    /// When the computer's audio was loud (the talk key's echo check), fed while listening to it.
+    public LoudnessLog? Loudness { get; set; }
     /// Seconds from the meeting's start to this side's first sample (the room side joins later).
     double offset;
     Channel<(Segment seg, Heard heard, double at, double queued)>? held;
@@ -122,10 +128,23 @@ public sealed class ListenEngine
     {
         if (Listening || RoomSide) return;
         var session = store.Begin();
+        // The clock starts with the record, not after the encoder has opened.
+        var since = System.Diagnostics.Stopwatch.GetTimestamp();
         SessionId = session.Id;
         Room = room;
         if (room) store.MarkRoom(session.Id);
-        Begin(from, room, 0);
+        if (settings.RecordAudio && store.Audio is { } files)
+        {
+            var path = Recording.Partial(Recording.SystemAudio(session.Id));
+            try
+            {
+                Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+                recorder = files.Open(path);
+            }
+            catch (Exception e) { Log.Debug($"listen: recording not started {e.GetType().Name}"); }
+            if (recorder is null) Log.Debug("listen: no recording, the encoder refused");
+        }
+        Begin(from, room, 0, since);
         notes.Language = () => Languages.EnglishName(settings.NotesCode);
         notes.Begin(session.Id);
         Log.Debug($"listen: started {session.Id} target={Target}");
@@ -150,7 +169,7 @@ public sealed class ListenEngine
         Changed?.Invoke();
     }
 
-    void Begin(IAudioSource from, bool room, double at)
+    void Begin(IAudioSource from, bool room, double at, long? since = null)
     {
         lock (gate)
         {
@@ -161,16 +180,30 @@ public sealed class ListenEngine
         offset = at;
         segmenter = new Segmenter(room ? new VoiceGate() : null);
         segmenter.Emitted += Send;
-        audio = Channel.CreateUnbounded<short[]>(new UnboundedChannelOptions { SingleReader = true });
+        audio = Channel.CreateUnbounded<(short[], double)>(new UnboundedChannelOptions { SingleReader = true });
         var reader = audio.Reader;
-        // One reader thread owns the segmenter: audio callbacks only queue buffers.
+        began = since ?? System.Diagnostics.Stopwatch.GetTimestamp();
+        long fed = 0;
+        // One reader thread owns the segmenter (and the recording): audio callbacks only queue buffers.
         worker = Task.Run(async () =>
         {
-            await foreach (var buf in reader.ReadAllAsync())
+            await foreach (var (buf, at) in reader.ReadAllAsync())
             {
+                // Keep the meeting's clock: a gap the source left (the PC silent, a source switch)
+                // goes in as silence, so a line's t and the recording both stay on the wall clock.
+                if (Recording.Behind(at, fed, buf.Length) is > 0 and var gap)
+                {
+                    var silence = new short[gap];
+                    segmenter.Feed(silence);
+                    Record(silence);
+                    fed += gap;
+                }
+                Record(buf);
+                fed += buf.Length;
                 Level = Rms(buf);
                 // The computer is playing speech: the room mic would hear it from the speakers.
                 if (!RoomSide && Echo is { } echo && Level >= Segmenter.Threshold) echo.Gate.Hold();
+                if (!RoomSide) Loudness?.Add(Level >= Segmenter.Threshold);
                 segmenter.Feed(buf);
             }
             segmenter.Flush();
@@ -200,7 +233,25 @@ public sealed class ListenEngine
         }
     }
 
-    void OnSamples(short[] buf) => audio?.Writer.TryWrite(buf);
+    void OnSamples(short[] buf) => audio?.Writer.TryWrite((buf, System.Diagnostics.Stopwatch.GetElapsedTime(began).TotalSeconds));
+
+    void Record(short[] pcm)
+    {
+        if (recorder is null) return;
+        try { recorder.Write(pcm); }
+        catch (Exception e)
+        {
+            Log.Debug($"listen: recording failed {e.GetType().Name} 0x{e.HResult:X8}, stopped");
+            CloseRecording();
+        }
+    }
+
+    void CloseRecording()
+    {
+        var r = recorder;
+        recorder = null;
+        try { r?.Close(); } catch (Exception e) { Log.Debug($"listen: recording close failed {e.GetType().Name}"); }
+    }
 
     /// 听哪里 changed mid-meeting between the computer and the room: the same meeting goes on from the
     /// other source, its clock running on.
@@ -238,6 +289,7 @@ public sealed class ListenEngine
         if (worker is not null) await worker;
         Task[] waiting;
         lock (gate) waiting = inFlight.ToArray();
+        CloseRecording();
         await Task.WhenAny(Task.WhenAll(waiting), Task.Delay(15_000));
         var id = SessionId!;
         if (RoomSide)
@@ -312,6 +364,8 @@ public sealed class ListenEngine
         foreach (var (seg, heard) in ready)
         {
             if (heard is null) continue;
+            // Words in the computer's audio: speech, which the room mic is silenced for (EchoGate).
+            if (!RoomSide && Echo is { } words && !string.IsNullOrWhiteSpace(heard.Original)) words.Gate.HeardWords();
             if (RoomSide && held is { } h && Echo is { } echo) h.Writer.TryWrite((seg, heard, EmittedAt(seg), echo.Gate.Clock()));
             else Record(seg, heard);
         }

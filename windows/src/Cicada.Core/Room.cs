@@ -70,6 +70,8 @@ public sealed class GatedSource : IAudioSource
 {
     readonly IAudioSource inner;
     public Func<bool>? Silenced { get; set; }
+    /// Each buffer's level (0–1) and length in seconds, before silencing.
+    public Action<double, double>? Heard { get; set; }
     public volatile bool Muted;
     public event Action<short[]>? Samples;
     public event Action<string?>? Ended;
@@ -79,7 +81,17 @@ public sealed class GatedSource : IAudioSource
     public GatedSource(IAudioSource inner)
     {
         this.inner = inner;
-        inner.Samples += buf => Samples?.Invoke(Muted || Silenced?.Invoke() == true ?new short[buf.Length] : buf);
+        inner.Samples += buf =>
+        {
+            // What the mic really hears, for EchoGate's measurement, before any silencing.
+            if (Heard is { } heard && buf.Length > 0)
+            {
+                double sum = 0;
+                foreach (var v in buf) sum += (double)v * v;
+                heard(Math.Sqrt(sum / buf.Length) / 32768, buf.Length / 16000.0);
+            }
+            Samples?.Invoke(Muted || Silenced?.Invoke() == true ? new short[buf.Length] : buf);
+        };
         inner.Ended += why => Ended?.Invoke(why);
     }
 

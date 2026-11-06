@@ -136,6 +136,11 @@ final class AppSettings: ObservableObject {
     @Published var aiCustomRecognize: Bool {
         didSet { save() }
     }
+    /// 语音和文字只发给你的服务: with the custom service, Google Translate is never asked (partial
+    /// lines show the original). Kept when another service is picked, but only acts on the custom one.
+    @Published var aiCustomOnly: Bool {
+        didSet { save() }
+    }
 
     var provider: AIProvider { AIProvider.named(aiProvider) }
 
@@ -244,6 +249,7 @@ final class AppSettings: ObservableObject {
         aiCustomHearModel = defaults.string(forKey: "aiCustomHearModel") ?? ""
         aiCustomHearBase = defaults.string(forKey: "aiCustomHearBase") ?? ""
         aiCustomRecognize = defaults.bool(forKey: "aiCustomRecognize")
+        aiCustomOnly = defaults.bool(forKey: "aiCustomOnly")
         displayMode = defaults.string(forKey: "displayMode") ?? "notes"
         speakVoices = defaults.dictionary(forKey: "speakVoices") as? [String: String] ?? [:]
         endWithApp = defaults.object(forKey: "endWithApp") as? Bool ?? true
@@ -296,6 +302,7 @@ final class AppSettings: ObservableObject {
         defaults.set(aiCustomHearModel, forKey: "aiCustomHearModel")
         defaults.set(aiCustomHearBase, forKey: "aiCustomHearBase")
         defaults.set(aiCustomRecognize, forKey: "aiCustomRecognize")
+        defaults.set(aiCustomOnly, forKey: "aiCustomOnly")
         defaults.set(displayMode, forKey: "displayMode")
         defaults.set(speakVoices, forKey: "speakVoices")
         defaults.set(endWithApp, forKey: "endWithApp")

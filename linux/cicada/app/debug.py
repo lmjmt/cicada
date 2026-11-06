@@ -6,6 +6,7 @@ per connection, one JSON line back. Never in release builds.
   target <code> | key-reload | windows | select <record id> | append <record id> <n> (a growing meeting)
   provider ling|openrouter|zenmux|custom | ai-model hear|text|voice <id> (设置 › AI 服务; "" back to the recommended) |
   ai-base text|voice|hear <url> (其他（兼容 OpenAI）'s addresses; "" for voice/hear: the text one)
+  ai-custom-only on|off (语音和文字只发给你的服务, the Mac's aiCustomOnly)
   speak-enable on|off | speak on|off (同声传译) | quit
   calls <program=name,…>|none|real (meeting apps in a call) | endtimes <silence> <countdown> <grace>|off | endkeep
   notes-tab notes|transcript | notes-search <text> | notes-wide on|off | onboarding-step <n> | settings-scroll <0-1>
@@ -15,12 +16,15 @@ per connection, one JSON line back. Never in release builds.
   pill (the records window capsule's widget sizes)
   listen-source system|room|both (听哪里) | room-mic [<source>|auto] | lines [<record id>] (each line's via)
   online both|no (answer 线上也有人？) | room-mic-force <source>|"" (a null sink's monitor as the room mic)
-  hide notes | problem-wait <seconds>|off (how long unreachable lasts before its notification; off: 2 min)"""
+  hide notes | problem-wait <seconds>|off (how long unreachable lasts before its notification; off: 2 min)
+  codecs (AAC encoder / decoders here) | play [<seconds>] | pause | rate (next speed) | playstate (the shown record's
+  recording: state, time, length, rate, the highlighted line) | settings-general (设置 at 通用)"""
 from __future__ import annotations
 
 import os
 import socket
 import threading
+import time
 
 from gi.repository import GLib
 
@@ -132,8 +136,9 @@ def command(app, line: str) -> dict:
                 "pending": listen.pending, "problem": listen.problem, "problemKind": listen.problem_kind, "heardSeconds": round(listen.heard_seconds, 1),
                 "peak": round(listen.peak, 4), "notes": {"title": n.title, "topics": len(n.topics), "status": app.notes.status, "final": n.final},
                 "key": app.ling.key_state, "ai": _ai(app), "view": app.settings.view, "listenSource": app.settings.listenSource,
+                "mic": app.mic_on,
                 "hybrid": {"roomSide": listen.hears_room_too, "echoCancel": app.echo.on, "gated": listen.gated,
-                           "note": app.hybrid_note(), "onlinePrompt": app.online_prompt},
+                           "echo": listen.echo_gate.echo, "music": listen.echo_gate.playing_music(time.monotonic())},
                 "target": app.settings.target_code,
                 "ui": __import__("cicada.core.strings", fromlist=["language"]).language, "records": len(app.store.all()),
                 "tray": app.tray is not None, "home": Paths.data(),
@@ -185,12 +190,15 @@ def command(app, line: str) -> dict:
     if cmd == "settings-ai":
         app.show_settings(ai=True)
         return {"ok": True}
-    if cmd == "listen-source":  # 听哪里 (system|room|both), mid-meeting too
-        app.set_listen_source(arg)
-        return {"ok": True, "listenSource": app.settings.listenSource, "source": listen.source_kind}
-    if cmd == "online":  # answer 线上也有人？ (both|no)
-        app.answer_online(arg == "both")
-        return {"ok": True, "listenSource": app.settings.listenSource}
+    if cmd in ("mic", "listen-source"):  # 打开麦克风 (on|off); listen-source both|room|system, the old names
+        app.set_mic(arg in ("on", "both", "room"))
+        return {"ok": True, "mic": app.mic_on, "source": listen.source_kind}
+    if cmd == "room-echo-sim":  # pretend the speakers do (on) or don't (off) reach the room mic; real
+        listen.echo_gate.forced = None if arg in ("", "real") else arg != "off"
+        return {"ok": True, "echo": listen.echo_gate.echo}
+    if cmd == "room-echo":  # the sound server's echo cancellation for the room mic (on|off), next start
+        app.room_echo_cancel = arg == "on"
+        return {"ok": True}
     if cmd == "room-mic-force":  # any source as the room mic, e.g. a null sink's monitor ("" = off)
         app.forced_room_mic = arg or None
         return {"ok": True, "forced": app.forced_room_mic}
@@ -259,6 +267,9 @@ def command(app, line: str) -> dict:
         app.settings.save()
         app.ai_changed()
         return {"ok": True, "ai": _ai(app)}
+    if cmd == "ai-custom-only":
+        app.set_custom_only(arg == "on")
+        return {"ok": True, "ai": _ai(app)}
     if cmd == "ai-model":
         kind, _, model = arg.partition(" ")
         app.set_ai_model(kind, model.strip())
@@ -290,6 +301,31 @@ def command(app, line: str) -> dict:
         if (arg == "on") != app.speak.active:
             app.toggle_speaking()
         return {"ok": True, "speaking": app.speak.active}
+    if cmd == "codecs":
+        from . import media
+        return {"ok": True, **media.codecs(), "recordAudio": app.settings.recordAudio, "recording": listen.recording}
+    if cmd in ("play", "pause", "rate", "playstate"):
+        w = app.records_window
+        p = w.player if w is not None else None
+        if cmd != "playstate" and p is None:
+            return {"ok": False, "error": "no recording shown"}
+        if cmd == "play":
+            p.play_from(float(arg)) if arg else p.play()
+        elif cmd == "pause":
+            p.pause()
+        elif cmd == "rate":
+            p.next_rate()
+        hl = w._hl_row if w is not None else None
+        sid = w.selected if w is not None else None
+        s = app.store.get(sid) if sid else None
+        return {"ok": True, "record": sid, "audio": w._built_key[3] if w is not None and w._built_key else None,
+                "hasAudio": s.hasAudio if s else None, "playing": p.playing if p else None,
+                "time": round(p.time, 2) if p else None, "length": round(p.length, 2) if p else None,
+                "rate": p.rate if p else None,
+                "line": next((i for i, (_k, r) in enumerate(w._rows) if r is hl), None) if hl is not None else None}
+    if cmd == "settings-general":
+        app.show_settings(general=True)
+        return {"ok": True}
     if cmd == "select":
         app.show_records()
         app.records_window.selected = arg
@@ -389,4 +425,6 @@ def _ai(app) -> dict:
             "proxyLine": ling.check_result.proxy_line(ling.service_name, ling.service_host),
             "keyWorks": app.key_works, "asking": getattr(app, "_asking", None) is not None,
             "lastVoice": list(ling.last_voice) if ling.last_voice else None, "simulate": ling.simulate,
-            "catalog": [len(ling.text_catalog), len(ling.hear_catalog)], "keyFile": os.path.basename(app.key.path)}
+            "catalog": [len(ling.text_catalog), len(ling.hear_catalog)], "keyFile": os.path.basename(app.key.path),
+            "customOnly": app.settings.aiCustomOnly, "googleOff": app.translator.google_off,
+            "sentencesUntranslated": app.translator.sentences_untranslated}

@@ -12,6 +12,21 @@ data class Heard(val lang: String, val original: String, val translation: String
 class Translator(private val ling: LingClient, private val transport: Transport = UrlTransport) {
     @Volatile private var googleBackoffUntil = 0L
 
+    /// 语音和文字只发给你的服务 (the Mac's googleOff; set by the app for the custom service only):
+    /// Google is never asked, so the text stays with the user's service. Flipping it forgets a
+    /// Google backoff and what the last sentence did.
+    @Volatile var googleOff = false
+        set(value) {
+            if (value == field) return
+            field = value
+            googleBackoffUntil = 0L
+            sentencesUntranslated = false
+        }
+
+    /// The last finished sentence sent here came back untranslated (the Mac's
+    /// TranslationHealth.sentencesUntranslated): with googleOff, the user's service can't be reached.
+    @Volatile var sentencesUntranslated = false
+
     /// Names and terms the notes have settled on, e.g. "江充 (…; misheard as 江松)".
     @Volatile var glossary: () -> List<String> = { emptyList() }
 
@@ -30,7 +45,8 @@ class Translator(private val ling: LingClient, private val transport: Transport 
 
     // MARK: Text
 
-    enum class Kind { Draft, Sentence }
+    /// Speak: my words for 我说 (the Mac's .speak), which don't count as the meeting's subtitles.
+    enum class Kind { Draft, Sentence, Speak }
 
     @Volatile private var lastUnreachableTry = 0L
 
@@ -45,9 +61,17 @@ class Translator(private val ling: LingClient, private val transport: Transport 
         return true
     }
 
-    /// The AI service (finished sentences only) → Google. Null when both fail.
+    /// The AI service (finished sentences only) → Google (never with googleOff). Null when both fail.
     fun translate(text: String, source: String, target: String, kind: Kind): String? {
         if (source == target) return text
+        // Partial text only ever goes to Google: left out, it shows the original until the sentence ends.
+        if (kind == Kind.Draft && googleOff) return null
+        val out = chain(text, source, target, kind)
+        if (kind == Kind.Sentence) sentencesUntranslated = out == null
+        return out
+    }
+
+    private fun chain(text: String, source: String, target: String, kind: Kind): String? {
         if (kind != Kind.Draft && ling.usable && lingWorthTrying()) {
             try {
                 val from = if (source == "auto") "the spoken language" else Languages.englishName(source)
@@ -60,7 +84,7 @@ class Translator(private val ling: LingClient, private val transport: Transport 
                 cleanTranslation(out, target)?.let { return it }
             } catch (e: LingException) { Log.d("translate ling failed: ${e.message}") }
         }
-        if (System.currentTimeMillis() < googleBackoffUntil) return null
+        if (googleOff || System.currentTimeMillis() < googleBackoffUntil) return null
         try {
             val url = "https://translate.googleapis.com/translate_a/single?client=gtx" +
                 "&sl=${enc(source)}&tl=${enc(target)}&dt=t&q=${enc(text)}"

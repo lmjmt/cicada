@@ -12,7 +12,7 @@ from cicada.core.ling import LingClient
 from cicada.core.listen import ROOM_IDS, ListenEngine
 from cicada.core.models import TranscriptLine
 from cicada.core.notes import NotesEngine
-from cicada.core.roommic import (EchoGate, EchoMatch, Heard, Input, VoiceGate, asks_online, heard_both, hybrid_note, parse_sources,
+from cicada.core.roommic import (EchoGate, EchoMatch, Heard, Input, VoiceGate, heard_both, parse_sources,
                                  pick, place_starts)
 from cicada.core.session_store import SessionStore
 from cicada.core.settings import AppSettings
@@ -234,19 +234,45 @@ class Places(Base):
         ls = [line("a"), line("b"), line("c", via="room"), line("d", "me"), line("e", via="room"), line("f")]
         self.assertEqual({"a", "c", "e", "f"}, place_starts(ls))
 
-    def test_online_prompt_asks_only_in_the_room_during_a_call(self):
-        self.assertTrue(asks_online(True, False, True))
-        self.assertFalse(asks_online(True, False, False))
-        self.assertFalse(asks_online(True, True, True))
-        self.assertFalse(asks_online(False, False, True))
+    def test_music_stops_closing_the_gate(self):
+        g = EchoGate()
+        t = 0.0
+        while t < EchoGate.music - 1:
+            g.hold(t)
+            t += 0.1
+        self.assertTrue(g.closed(t))  # no words yet: still taken for speech
+        while t < EchoGate.music + 1:
+            g.hold(t)
+            t += 0.1
+        self.assertTrue(g.playing_music(t))
+        t += EchoGate.hang + 0.01
+        g.hold(t)
+        self.assertFalse(g.closed(t + 0.01))
+        g.heard_words(t + 0.1)  # someone talks over it: words close it again
+        g.hold(t + 0.2)
+        self.assertTrue(g.closed(t + 0.3))
 
-    def test_note_says_how_the_room_is_heard(self):
-        self.assertIsNone(hybrid_note(True, True, False, False))
-        self.assertIsNone(hybrid_note(False, False, False, True))
-        self.assertEqual("线上有人说话时，先不听会议室", hybrid_note(True, False, False, True))
-        self.assertEqual("用电脑自带的麦克风听会议室", hybrid_note(True, True, False, True))
-        # 戴着耳机: nothing to cancel, nothing paused.
-        self.assertIsNone(hybrid_note(True, False, True, False))
+    def _play(self, g, start, level):
+        t = start
+        for _ in range(60):
+            g.hold(t)
+            g.room_level(level, 0.1, t + 0.05)
+            t += 0.1
+        for _ in range(60):
+            t += 0.1
+            g.room_level(0.001, 0.1, t)
+        return t
+
+    def test_headphones_keep_the_room_open(self):
+        g = EchoGate()
+        self.assertTrue(g.echo)  # until measured
+        t = self._play(g, 0, 0.001)
+        self.assertFalse(g.echo)
+        g.hold(t + 1)
+        self.assertFalse(g.closed(t + 1.1))
+        self._play(g, t + 100, 0.03)  # the speakers reach the mic again
+        self.assertTrue(g.echo)
+        self.assertIsNone(EchoGate.ratio([(0.001, 1)], [(0.001, 10)]))
 
 
 ONLINE = "Revenue grew by 12%, mostly from the new region."

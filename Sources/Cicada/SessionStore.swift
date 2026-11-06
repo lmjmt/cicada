@@ -82,6 +82,8 @@ struct Session: Codable, Identifiable, Equatable {
 final class SessionStore: ObservableObject {
     @Published private(set) var sessions: [Session] = []
     @Published private(set) var liveID: String?
+    /// The last meeting whose recording became a playable .m4a (the rewrap runs after the meeting).
+    @Published private(set) var audioFinished: String?
 
     let root: URL
     /// Per meeting: a file being imported saves alongside the live meeting without delaying it.
@@ -169,7 +171,14 @@ final class SessionStore: ObservableObject {
     /// Turns the meeting's recordings into .m4a files (call after the recorders are closed).
     func finishAudio(_ id: String, until: Double? = nil) {
         let urls = [systemAudioURL(id), micAudioURL(id)]
-        Task.detached(priority: .utility) { for u in urls { await AudioFileWriter.finish(u, until: until) } }
+        Task.detached(priority: .utility) {
+            for u in urls { await AudioFileWriter.finish(u, until: until) }
+            await self.markAudioFinished(id)
+        }
+    }
+
+    private func markAudioFinished(_ id: String) {
+        audioFinished = id
     }
 
     var liveStart: Date? { liveID.flatMap { index($0) }.map { sessions[$0].startedAt } }

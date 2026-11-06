@@ -25,22 +25,6 @@ import Testing
         #expect(RoomMicPlan.pick(defaultUID: "blackhole", inputs: [blackhole, airpods]) == "airpods")
         #expect(RoomMicPlan.pick(defaultUID: nil, inputs: [blackhole]) == nil)
     }
-
-    @Test func asksAboutTheRoomAfterAQuietMinute() {
-        #expect(!RoomPrompt.asks(room: false, listened: 30, voiced: 0))
-        #expect(RoomPrompt.asks(room: false, listened: 61, voiced: 0))
-        // Something played: it is an online meeting after all.
-        #expect(!RoomPrompt.asks(room: false, listened: 300, voiced: 5))
-        // Already listening to the room.
-        #expect(!RoomPrompt.asks(room: true, listened: 300, voiced: 0))
-    }
-
-    @Test func notDuringACallOrOnceAnswered() {
-        #expect(RoomPrompt.shows(silent: true, answered: false, inCall: false))
-        #expect(!RoomPrompt.shows(silent: true, answered: true, inCall: false))
-        #expect(!RoomPrompt.shows(silent: true, answered: false, inCall: true))
-        #expect(!RoomPrompt.shows(silent: false, answered: false, inCall: false))
-    }
 }
 
 @Suite struct VoiceGateTests {

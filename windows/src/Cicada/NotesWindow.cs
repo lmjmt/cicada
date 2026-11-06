@@ -130,10 +130,7 @@ sealed class NotesWindow : Window
         if (app.ConfirmingEnd) return ConfirmEnd();
         if (app.Ending is not { } p)
         {
-            if (app.OnlinePrompt is not { } meetingApp) return new Border();
-            var strip = TrayFlyout.OnlineStrip(app, meetingApp);
-            strip.Margin = new Thickness(12, 0, 12, 8);
-            return strip;
+            return new Border();
         }
         Detach(endingDetail);
         var buttons = Ui.Row(8, Ui.Button(L("继续记录"), app.KeepRecording, Ui.Kind.Primary, height: 32),
@@ -176,13 +173,13 @@ sealed class NotesWindow : Window
             scroll = new ScrollViewer { VerticalScrollBarVisibility = ScrollBarVisibility.Auto, Padding = new Thickness(20, 16, 16, 12) };
             Content = Subtitles ? SubtitleFrame() : PanelFrame();
         }
-        var key = $"{app.Listen.Listening}|{app.Settings.ShowInCapture}|{hiddenFromCapture}";
+        var key = $"{app.Listen.Listening}|{app.MicOn}|{app.Settings.ShowInCapture}|{hiddenFromCapture}";
         if (key != headerKey) { headerKey = key; header.Content = Header(); }
         Tick();
         if (Subtitles) { live.Content = SubtitleLine(); return; }
-        var ek = !app.Listen.Listening ? null : app.ConfirmingEnd ? "confirm" : app.Ending is { } p ? p.Reason.ToString() : app.OnlinePrompt is { } o ? "online " + o : null;
+        var ek = !app.Listen.Listening ? null : app.ConfirmingEnd ? "confirm" : app.Ending is { } p ? p.Reason.ToString() : null;
         if (ek != endingKey) { endingKey = ek; ending.Content = EndingStrip(); }
-        var bk = $"{app.Listen.Problem}|{app.Listen.ProblemStatus}|{(app.Listen.Listening && app.Notes.Status is NotesEngine.State.Failed or NotesEngine.State.RateLimited or NotesEngine.State.Unreachable or NotesEngine.State.Updating ? app.Notes.Status : null)}|{app.Ling.Health.Failure?.Why}|{app.Settings.AiProvider}|{app.CanSwitchToLing}|{app.Settings.ShowInCapture}|{hiddenFromCapture}";
+        var bk = $"{app.Listen.Problem}|{app.Listen.ProblemStatus}|{(app.Listen.Listening && app.Notes.Status is NotesEngine.State.Failed or NotesEngine.State.RateLimited or NotesEngine.State.Unreachable or NotesEngine.State.Updating ? app.Notes.Status : null)}|{app.Ling.Health.Failure?.Why}|{app.Settings.AiProvider}|{app.CanSwitchToLing}|{app.Translator.GoogleOff && app.Translator.SentencesUntranslated}|{app.Settings.ShowInCapture}|{hiddenFromCapture}";
         if (bk != barsKey) { barsKey = bk; bars.Content = Bars(); }
         live.Content = LiveCard();
         var count = app.Listen.SessionId is { } sid ? app.Store.Get(sid)?.Lines.Count ?? 0 : 0;
@@ -228,6 +225,11 @@ sealed class NotesWindow : Window
             buttons.Children.Add(Ui.IconButton(Icons.Notes, L("换成纪要"), () => app.SetView("notes"), Palette.NightText, 32, 16, onDark: true));
             if (listen.Listening)
             {
+                // 打开麦克风 (the Mac's bar has it while editing; this bar takes clicks anyway).
+                var mic = Ui.IconButton(Icons.Mic, app.MicOn ? L("关闭麦克风") : L("打开麦克风"), () => app.SetMic(!app.MicOn),
+                                        app.MicOn ? NightAccent : Palette.NightText, 32, 15, onDark: true);
+                if (app.MicOn) mic.Background = new SolidColorBrush(Color.FromArgb(0x33, 0xE8, 0x55, 0x2B));
+                buttons.Children.Add(Gap(mic, 6));
                 var stop = Ui.IconButton("M7,7 H13 V13 H7 Z", L("结束"), app.RequestStop, NightAccent, 32, 14, fill: true, onDark: true);
                 stop.Background = new SolidColorBrush(Color.FromArgb(0x1F, 0xFF, 0xFF, 0xFF));
                 buttons.Children.Add(Gap(stop, 6));
@@ -236,10 +238,11 @@ sealed class NotesWindow : Window
             return buttons;
         }
         var left = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center };
+        FrameworkElement? listening = null;
         if (listen.Listening && session is not null)
         {
             left.Children.Add(Ui.LiveDot());
-            left.Children.Add(Gap(Ui.Text(L("正在听"), 14, Palette.Ink, FontWeights.Bold, wrap: false), 8));
+            left.Children.Add(listening = Gap(Ui.Text(L("正在听"), 14, Palette.Ink, FontWeights.Bold, wrap: false), 8));
             Detach(clockText);
             clockText.FontSize = 13; clockText.Foreground = Palette.Secondary; clockText.HorizontalAlignment = HorizontalAlignment.Left;
             left.Children.Add(Gap(clockText, 8));
@@ -255,9 +258,30 @@ sealed class NotesWindow : Window
             ? Ui.Button(L("结束"), app.RequestStop, Ui.Kind.Pale, Icons.Stop, 32, iconFill: true)
             : Ui.Button(L("开始听"), () => _ = app.ToggleListening(), Ui.Kind.Accent, Icons.Wave, 32);
         main.MinWidth = 0; main.Padding = new Thickness(12, 0, 12, 0);
+        if (listen.Listening)
+        {
+            // The Mac's header buttons are 12 pt: at 14 the English "Turn off mic" and "End" pushed
+            // 收起 out of the window.
+            Snug(main);
+            right.Children.Add(Gap(Snug(TrayFlyout.MicButton(app, panel: false)), 8));
+        }
         right.Children.Add(Gap(main, 8));
         right.Children.Add(Gap(Ui.IconButton("M5,10 H15", L("收起（继续听）"), Collapse, Palette.Body, 34, 16), 4));
-        var row = Ui.Spread(left, right);
+        // The buttons are docked first so a long status in a wide language clips the clock, never 收起.
+        var row = new DockPanel { LastChildFill = false };
+        DockPanel.SetDock(right, Dock.Right); DockPanel.SetDock(left, Dock.Left);
+        row.Children.Add(right); row.Children.Add(left);
+        left.ClipToBounds = true;
+        // Too narrow for the word and the clock (English with the mic button): the live dot and
+        // the clock say it on their own.
+        if (listening is not null)
+            row.SizeChanged += (_, e) =>
+            {
+                listening.Visibility = Visibility.Visible;
+                left.Measure(new Size(double.PositiveInfinity, double.PositiveInfinity));
+                right.Measure(new Size(double.PositiveInfinity, double.PositiveInfinity));
+                if (left.DesiredSize.Width + right.DesiredSize.Width > e.NewSize.Width) listening.Visibility = Visibility.Collapsed;
+            };
         row.Height = 56;
         row.Margin = new Thickness(18, 0, 10, 0);
         return row;
@@ -288,6 +312,13 @@ sealed class NotesWindow : Window
             else Add(Ui.StatusLine(Ui.Tone.Waiting, text, (L("重试"), () => { app.Listen.ClearProblem(); _ = app.Ling.Check(); })));
         }
         var unreachable = app.Ling.Health.Failure?.Why == AICheck.Reason.Unreachable;
+        // 语音和文字只发给你的服务, and finished sentences go untranslated: it picks up by itself, and
+        // no 改用 Ling (that would send the meeting elsewhere). When hearing failed, its line says so.
+        var notesWait = app.Notes.Status is NotesEngine.State.Unreachable or NotesEngine.State.Updating && unreachable;
+        var stalled = problem is null && app.Listen.Listening && app.Translator.GoogleOff && app.Translator.SentencesUntranslated;
+        if (stalled)
+            Add(Ui.StatusLine(Ui.Tone.Waiting, notesWait ? LF("译文和纪要等 %@ 恢复 · 字幕先显示原文", ServiceLabel())
+                                                          : LF("译文等 %@ 恢复 · 字幕先显示原文", ServiceLabel())));
         if (app.Listen.Listening)
             switch (app.Notes.Status)
             {
@@ -299,7 +330,7 @@ sealed class NotesWindow : Window
                 // only timed out while translations still came back retry on the next round. The retry
                 // that follows (Updating) hangs as long as a timeout: the line stays meanwhile. When
                 // hearing can't reach it either, its line above says so already.
-                case NotesEngine.State.Unreachable or NotesEngine.State.Updating when unreachable:
+                case NotesEngine.State.Unreachable or NotesEngine.State.Updating when unreachable && !stalled:
                     if (problem is not (LingException.Kind.Network or LingException.Kind.Timeout))
                     {
                         // A hear model served at another address still brings subtitles.
@@ -565,11 +596,23 @@ sealed class NotesWindow : Window
     }
 
     /// One line of the transcript as on the Mac: who (in their colour) and when, the original in
-    /// grey, the translation in ink.
-    internal static FrameworkElement TranscriptRow(TranscriptLine l, string? who = null, Brush? ink = null, bool place = false)
+    /// grey, the translation in ink. With `play` (a record with its recording) the time is a link
+    /// that plays from there; it is tagged "time" so the player can light it.
+    internal static FrameworkElement TranscriptRow(TranscriptLine l, string? who = null, Brush? ink = null, bool place = false, Action<double>? play = null)
     {
         var text = new StackPanel { Margin = new Thickness(0, who is null && !place ? 0 : 6, 0, 12) };
-        var head = Ui.Row(8, Ui.Text(Languages.Clock(l.T), 12, Palette.Tertiary, wrap: false));
+        var time = Ui.Text(Languages.Clock(l.T), 12, play is null ? Palette.Tertiary : Palette.TimeLink, wrap: false);
+        if (play is not null)
+        {
+            time.Tag = "time";
+            time.Cursor = System.Windows.Input.Cursors.Hand;
+            time.ToolTip = L("从这里播放");
+            time.MouseLeftButtonDown += (_, e) => { e.Handled = true; play(l.T); };
+            time.MouseEnter += (_, _) => time.TextDecorations = TextDecorations.Underline;
+            time.MouseLeave += (_, _) => time.TextDecorations = null;
+            System.Windows.Automation.AutomationProperties.SetName(time, L("从这里播放") + " " + time.Text);
+        }
+        var head = Ui.Row(8, time);
         if (place) head.Children.Insert(0, PlaceTag(l));
         if (who is not null) head.Children.Insert(0, Ui.Text(who, 12, ink ?? Palette.Secondary, wrap: false));
         for (int i = 1; i < head.Children.Count; i++) ((FrameworkElement)head.Children[i]).Margin = new Thickness(i == 1 && place && who is not null ? 6 : 8, 0, 0, 0);
@@ -670,6 +713,15 @@ sealed class NotesWindow : Window
     {
         e.Margin = top ? new Thickness(0, size, 0, 0) : new Thickness(size, 0, 0, 0);
         return e;
+    }
+
+    /// A header button at the Mac's size: 13 px label, 10 px sides.
+    static Button Snug(Button b)
+    {
+        b.Padding = new Thickness(10, 0, 10, 0);
+        if (b.Content is StackPanel { Children: var kids })
+            foreach (var t in kids.OfType<TextBlock>()) { t.FontSize = 13; t.Margin = new Thickness(t.Margin.Left > 0 ? 6 : 0, 0, 0, 0); }
+        return b;
     }
 
     static FrameworkElement Bullet(string text)

@@ -108,6 +108,8 @@ class DebugReceiver : BroadcastReceiver() {
                 app.setAiModel(kind, model)
                 return mapOf("ok" to true, "ai" to ai(app))
             }
+            // 语音和文字只发给你的服务 (the Mac's aiCustomOnly:on|off): `ai-custom-only on|off`.
+            "ai-custom-only" -> { app.setCustomOnly(arg == "on"); return mapOf("ok" to true, "ai" to ai(app)) }
             "voice-try" -> app.background.execute {
                 val r = app.voice.speakCloud(app.ling, "Could you send the revised quote by Friday? We can sign next week.", {}, {})
                 Log.d("debug: voice-try -> $r")
@@ -146,7 +148,9 @@ class DebugReceiver : BroadcastReceiver() {
             return mapOf("provider" to c.provider.id, "base" to c.base, "text" to c.textModel, "hear" to c.hearModel, "hearBase" to c.hearBase, "voice" to c.voiceModel,
                          "state" to l.keyState.name, "hears" to l.hears, "speaks" to l.speaks, "check" to l.aiCheck.summary,
                          "voice" to l.lastVoice?.first, "sim" to l.simulateCheck?.name,
-                         "catalog" to listOf(l.textCatalog.size, l.hearCatalog.size), "keyFile" to app.key.path.name)
+                         "catalog" to listOf(l.textCatalog.size, l.hearCatalog.size), "keyFile" to app.key.path.name,
+                         "customOnly" to app.settings.aiCustomOnly, "googleOff" to app.translator.googleOff,
+                         "untranslated" to app.translator.sentencesUntranslated)
         }
 
         fun state(app: CicadaApp): Map<String, Any?> {

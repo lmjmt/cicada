@@ -7,14 +7,14 @@
 
 - `lsctl <命令>`：通过分布式通知 `com.wquguru.cicada.debug` 遥控 App。
   - 开关字幕：`start` / `stop`（`start:user` 当作用户点了开始听，纪要窗口立即出现；`start` 当作自动开始，等到有人说话）
-  - 听哪里：`listenSource:<system|room|both>`（both 是电脑和会议室：再开一个听麦克风的识别，`hybridState` 把两边的状态写进日志；`roomEcho:off` / `roomGate:off` 下一场会议不用回声消除 / 不在电脑放人声时关麦克风，单独试每道防线，日志 `hybrid: room line dropped as an echo` / `kept`；`voiceMicRun:<on|off>` 只开回声消除单元看它对别的声音有没有影响）（room 用麦克风听会议室，日志里 `room mic started: <设备>`，念译文时 `room mic muted` / `open`），`roomPrompt:<room|no>` 等于在“在会议室里开会？”里点“改听会议室”或“不是”（听电脑 60 秒没声音才出现，日志 `mac silent true`）；`micDeniedSim:<on|off>` 让“电脑和会议室”当作麦克风被拒（纪要窗口顶部提示、字幕条橙色标签、菜单栏橙点，纪要窗口收起 10 秒后发一次通知，日志 `problem:` 和 `menu bar: badge=`）
+  - 麦克风：`mic:<on|off>` 等于点“打开麦克风”/“关闭麦克风”（没在听时打开会开始听；旧的 `listenSource:<system|room|both>` 也还能用），`hybridState` 把两边的状态写进日志，含 `echo=` 和测量值（扬声器传到麦克风没有）、`music=`、`micSilent=`；`roomEcho:on` / `roomGate:off` 下一场会议用系统回声消除 / 不在电脑放人声时关麦克风，单独试每道防线，日志 `hybrid: room line dropped as an echo` / `kept`、`room echo: speakers reach the mic` / `none`；`roomEchoSim:<on|off|real>` 假装测出（或没测出）回声；`roomMicSilent:<on|off>` 让麦克风从下次打开起只给 0（日志 `room mic: silent since it started`，再 `still silent`，纪要窗口出“麦克风没声音”）；`voiceMicRun:<on|off>` 只开回声消除单元看它对别的声音有没有影响；念译文时 `room mic muted` / `open`；`micDeniedSim:<on|off>` 让麦克风当作被拒（纪要窗口顶部提示、字幕条橙色标签、菜单栏橙点，纪要窗口收起 10 秒后发一次通知，日志 `problem:` 和 `menu bar: badge=`）。实测回声、桌边的话和同声传译：`.claude/skills/audio-test`
   - 打开界面：`open`（主窗口）、`panel`（菜单栏面板）、`settings[:speak]`（设置，可指定栏目）
   - 虚拟麦克风：`micTest` 试音（往虚拟麦克风播一句再听回来，结果写进日志），`micNext` 做清单里的下一步
   - 会议软件的麦克风：`micUsers` 把每个读麦克风的进程和列表写进日志，`micGuide:<bundle id 或名字>` 打开怎么改，`micGuideRender:<bundle id>=<png>`
   - 快捷键：`talkKey:right` 或 `talkKey:<keyCode>:<Carbon 修饰键>` 换说话键（被拒的原因写进日志），`toggleKey:…` 同理，`shortcuts` 把当前状态写进日志
   - 字幕条：`frame` 把位置写进日志，`place:x,y,宽,字号` 摆到指定位置
   - 系统麦克风：`sysMic` 把状态、默认输入、要换回的麦克风和知了实际在录的麦克风写进日志，`sysMicSet:<设备名片段>` 假装别人改了系统麦克风，`sysMicRestore` 还原，`sysMicSwitch` 换成虚拟麦克风，`sysMicAuto:<on|off>`，`speakMic:<设备名片段>` 固定知了用的麦克风（留空 = 自动）。会改本机的系统麦克风：测完 `sysMicRestore` 或退出 App
-  - 说话同传：`speakOn` / `speakOff` 开关，`speakAsk[:off]` 面板里第一次打开时的确认卡，`speakConfirmed:<on|off>` 是否已确认过，`speakFile:<音频>` 把文件按实时速度当作麦克风输入，`speakOut:<路径>` 把译文语音另存一份，`speakOutput:<设备名片段>` 改输出设备（留空 = 虚拟麦克风），`speakVP:<on|off>` 按键说话时用带回声消除的麦克风（默认关；日志 `voice mic: ready`、`speak: mic with echo cancellation`）
+  - 说话同传：`speakOn` / `speakOff` 开关，`speakAsk[:off]` 面板里第一次打开时的确认卡，`speakConfirmed:<on|off>` 是否已确认过，`speakFile:<音频>` 把文件按实时速度当作麦克风输入，`speakOut:<路径>` 把译文语音另存一份，`speakOutput:<设备名片段>` 改输出设备（留空 = 虚拟麦克风），`speakVP:<on|off>` 按键说话时用不用带回声消除的麦克风（默认开；日志 `voice mic: ready`、`speak: mic with echo cancellation`），`talkDown` / `talkUp` 用真麦克风按住、松开说话键（日志 `speak: on-device heard … Ming …`、没人说话时 `nothing said in the press`）
   - 试一句：`speakTest:sample`（Mac 读一句示例）或 `speakTest:voice`（再发 `speakTestBegin` / `speakTestEnd` 当作按住、松开），结果以 `speak test:` 写进日志；`speakTestState`、`speakTestRender:<png>`、`speakTestClose`
   - 识别引擎：`recognizer:legacy` 在 macOS 26 上改用 14 / 15 的识别（`SFSpeechRecognizer`，第一次会要“语音识别”权限），`recognizer:cloud` 像 Intel Mac 那样全部交给 Ling 听（没有 key 就听不了），`recognizer:auto` 换回；下一次开始听起生效（或启动时 `open --env CICADA_RECOGNIZER=legacy`），日志里 `transcriber started recognizer=…`
   - 多开：两边都设 `CICADA_DEBUG_CHANNEL=x`（`open -n --env CICADA_DEBUG_CHANNEL=x build/Cicada.app`），命令只发给这一份，日志在 `/tmp/livesubs-dev-debug-x.log`

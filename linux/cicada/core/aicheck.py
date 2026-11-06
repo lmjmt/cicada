@@ -180,12 +180,17 @@ class AICheck:
             SERVER_ERROR: lambda: LF("%@ 暂时出错（HTTP %lld），稍后再试。", service, code or 0),
         }[reason]()
 
-    def slow_line(self) -> str | None:
+    def slow_line(self, google_off: bool = False) -> str | None:
         """Why translations are slow, and what to do (a custom service). Linux falls back to Google
-        too (Translator.translate, 6 s), so the Mac's words hold."""
+        too (Translator.translate, 6 s), so the Mac's words hold; with 语音和文字只发给你的服务
+        (`google_off`) a sentence over 6 s is given up on instead (AICheck.slowLine(googleOff:))."""
         if not self.slow:
             return None
         secs = "%.1f" % self.translate.seconds
+        if google_off:
+            if self.translate.thinks:
+                return LF("这个模型先思考再回答，翻一句要 %@ 秒，超过 6 秒这句就不等它了。在服务端关掉思考，或换一个不思考的模型。", secs)
+            return LF("翻一句要 %@ 秒，超过 6 秒这句就不等它了。换一个更小的模型会快一些。", secs)
         if self.translate.thinks:
             return LF("这个模型先思考再回答，翻一句要 %@ 秒，超过 6 秒会改用 Google。在服务端关掉思考，或换一个不思考的模型。", secs)
         return LF("翻一句要 %@ 秒，超过 6 秒会改用 Google。换一个更小的模型会快一些。", secs)

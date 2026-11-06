@@ -12,6 +12,10 @@ object ProviderTests {
         "aiChosenModelsAndACustomService" to ::chosenAndCustom,
         "aiCustomAddress" to ::customAddress,
         "aiSettingsKeepTheServiceAcrossARestart" to ::settingsRoundTrip,
+        "aiCustomOnlyActsOnTheCustomServiceAlone" to ::customOnlySetting,
+        "aiCustomOnlyPartialLinesNeverGoToGoogle" to ::customOnlyDrafts,
+        "aiCustomOnlySentencesGoToTheServiceAlone" to ::customOnlySentences,
+        "aiCustomOnlyFlippingItForgetsTheGoogleBackoff" to ::customOnlyClearsBackoff,
         "aiEachServiceTurnsThinkingOffItsOwnWay" to ::shape,
         "aiAudioGoesInTheFormEachModelTakes" to ::audioPart,
         "aiCatalogListsChatModelsAndThoseThatHear" to ::catalog,
@@ -154,6 +158,11 @@ object ProviderTests {
         check(AICheck.Speed(6.4, false).slow, "slow")
         val c = AICheck(at = 1).pass(AICheck.StepID.Text, 4.2).copy(translate = AICheck.Speed(4.2, true))
         check(c.slow && c.slowLine()!!.contains("4.2"), "the slow line says how long")
+        check("Google" in c.slowLine()!!, "Google stands in for a slow sentence")
+        val off = c.slowLine(googleOff = true)!!
+        check("4.2" in off && "Google" !in off && "不等它了" in off, "语音和文字只发给你的服务: no word of Google")
+        val plain = AICheck(at = 1).pass(AICheck.StepID.Text, 6.4).copy(translate = AICheck.Speed(6.4, false)).slowLine(googleOff = true)!!
+        check("Google" !in plain && "更小的模型" in plain, "a slow model that doesn't think, without Google")
         check(AICheck(at = 1).pass(AICheck.StepID.Text, 0.5).copy(translate = AICheck.Speed(0.5, false)).slowLine() == null, "nothing to say")
         check("translate=4.2s thinks" in c.summary, "in the summary (the settings repaint on it)")
     }
@@ -255,11 +264,70 @@ object ProviderTests {
 
     fun settingsRoundTrip() {
         try {
-            AppSettings(aiProvider = "zenmux", aiHearModels = mutableMapOf("zenmux" to "bytedance/doubao-seed-2.0-mini")).save()
+            AppSettings(aiProvider = "zenmux", aiHearModels = mutableMapOf("zenmux" to "bytedance/doubao-seed-2.0-mini"), aiCustomOnly = true).save()
             val back = AppSettings.load()
             equal("zenmux", back.aiProvider, "service")
             equal("bytedance/doubao-seed-2.0-mini", back.aiConfig().hearModel, "hear model")
+            check(back.aiCustomOnly, "语音和文字只发给你的服务 kept")
         } finally { Paths.settings.delete() }
+    }
+
+    // MARK: 语音和文字只发给你的服务 (issue #15; the Mac's GoogleOffTests)
+
+    private fun custom(on: Boolean = true) = AppSettings(aiProvider = "custom", aiCustomBase = "http://127.0.0.1:8000/v1",
+        aiModels = mutableMapOf("custom" to "qwen3:14b"), aiHearModels = mutableMapOf("custom" to "qwen3-omni"), aiCustomOnly = on)
+
+    private fun google(url: String) = "translate.googleapis.com" in url
+    private val googleReply = Transport.Response(200, "[[[\"我们周五发布\",\"We ship on Friday\"]]]")
+
+    fun customOnlySetting() {
+        check(custom().customOnly, "in effect with the custom service")
+        check(!custom(on = false).customOnly, "off")
+        val other = custom().apply { aiProvider = "zenmux" }
+        check(other.aiCustomOnly && !other.customOnly, "kept, but inert, for another service")
+    }
+
+    fun customOnlyDrafts() {
+        val fake = Fake({ url, _ -> if (google(url)) googleReply else reply("我们周五发布") })
+        val t = Translator(client(fake, custom()), fake)
+        t.googleOff = true
+        for (i in 0 until 3) equal(null, t.translate("We ship on Friday", "en", "zh-CN", Translator.Kind.Draft), "draft $i shows the original")
+        equal(0, fake.sent.size, "partial text goes nowhere: not Google, never the AI service")
+        // Off, partial text still never reaches the AI service: only Google.
+        t.googleOff = false
+        equal("我们周五发布", t.translate("We ship on Friday", "en", "zh-CN", Translator.Kind.Draft), "draft via Google when off")
+        check(fake.sent.all { google(it.first) }, "a draft never goes to the AI service")
+    }
+
+    fun customOnlySentences() {
+        var up = true
+        val fake = Fake({ url, _ -> if (google(url)) googleReply else if (up) reply("我们周五发布") else Transport.Response(500, "{}") })
+        val t = Translator(client(fake, custom()), fake)
+        t.googleOff = true
+        equal("我们周五发布", t.translate("We ship on Friday", "en", "zh-CN", Translator.Kind.Sentence), "the service translates")
+        check(!t.sentencesUntranslated, "translated")
+        up = false
+        equal(null, t.translate("We ship on Friday", "en", "zh-CN", Translator.Kind.Sentence), "service down: the original only")
+        check(t.sentencesUntranslated, "says the sentence went untranslated")
+        check(fake.sent.none { google(it.first) }, "Google is never asked")
+        // Off again, Google stands in as before.
+        t.googleOff = false
+        check(!t.sentencesUntranslated, "flipping forgets the last sentence")
+        equal("我们周五发布", t.translate("We ship on Friday", "en", "zh-CN", Translator.Kind.Sentence), "Google stands in when off")
+        check(fake.sent.any { google(it.first) }, "Google asked when off")
+    }
+
+    fun customOnlyClearsBackoff() {
+        var googleUp = false
+        val fake = Fake({ url, _ -> if (google(url)) (if (googleUp) googleReply else Transport.Response(429, "")) else reply("") })
+        val t = Translator(client(fake, custom(on = false), key = null), fake)
+        equal(null, t.translate("Hello", "en", "zh-CN", Translator.Kind.Draft), "Google busy")
+        googleUp = true
+        val asked = fake.sent.size
+        equal(null, t.translate("Hello", "en", "zh-CN", Translator.Kind.Draft), "backing off")
+        equal(asked, fake.sent.size, "not asked while backing off")
+        t.googleOff = true; t.googleOff = false
+        equal("我们周五发布", t.translate("Hello", "en", "zh-CN", Translator.Kind.Draft), "the backoff went with the flip")
     }
 
     fun shape() {

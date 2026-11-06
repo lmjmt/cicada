@@ -180,15 +180,10 @@
 "文字 %@ 秒" = "text %@ s";
 "听 %@ 秒" = "hearing %@ s";
 "知了 · 会议室" = "Cicada · Room";
-"换" = "Change";
 "正在用麦克风听会议室，有人说话后约 3 秒出字幕" = "Listening to the room through the microphone. Subtitles appear about 3 s after someone speaks";
 "戴着蓝牙耳机时，自动用电脑自带的麦克风" = "With a Bluetooth headset on, Auto uses the computer's own mic";
-"用电脑自带的麦克风听会议室" = "Hearing the room with the computer's own mic";
 "知了 · 防回声" = "Cicada · Echo Cancellation";
-"戴着就不用防回声，桌边的话不会被丢；和同声传译共用这个开关" = "With headphones on there's no echo to remove, so nothing said at the table is lost. Shared with Interpreting";
 "电脑和会议室" = "Computer + Room";
-"电脑声音" = "This computer";
-"也听电脑" = "Hear the computer too";
 "电脑里放出来的" = "Played by the computer";
 /* The proxy hint for GNOME's proxy (proxy.py). */
 "代理 %@ 没有回应。打开代理软件，或在 设置 › 网络 › 网络代理 里改正。" = "The proxy %@ doesn’t answer. Open your proxy app, or fix it in Settings › Network › Network Proxy.";
@@ -203,3 +198,11 @@
 "没填，同声传译用不了" = "Not set: no voice for interpreting";
 "填上听的模型" = "Add a listening model";
 "本机和局域网服务可不填" = "Optional on this computer or your local network";
+/* 保存会议录音 and the recording's player (media.py, records_window.py). */
+"会议结束后可以回放录音" = "The recording plays back once the meeting ends";
+"找不到录音，没法播放" = "Can't find the recording to play";
+"这场会议没存录音 ·" = "No recording of this meeting ·";
+"只存在这台电脑上" = "Kept only on this computer";
+"这台电脑缺少 AAC 编码器，装上“第三方媒体格式”后可用" = "This computer has no AAC encoder. Available once third-party media formats are installed";
+/* The mic row under the notes window header (notes_window.py › _fill_source): the Mac's says Mac. */
+"关着 · 只听电脑声音" = "Off · computer audio only";

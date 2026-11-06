@@ -102,12 +102,15 @@ final class SpeakEngine {
     let settings: AppSettings
     private(set) var phase: Phase = .idle
 
-    private let mic = AVAudioEngine()
+    private var mic = AVAudioEngine()
     /// The mic with echo cancellation, shared with 电脑和会议室's room (`VoiceMic`): used when
     /// `echoCancel` is on, or whenever the room already has it running.
     private let voiceMic: VoiceMic
-    /// Debug (`speakVP:on`) until a person has checked it with a real voice; off: the plain mic.
-    var echoCancel = false {
+    /// On by default (`speakVP:off` for the plain mic). With the meeting on the speakers and the
+    /// plain mic, Ming took the meeting's own English for what I said and sent it back into the
+    /// meeting, every press, even one nobody spoke in; through the unit my sentences came through
+    /// whole (an ESP32 speaker 10 cm from the mic as me, the MacBook's speakers at 56 %).
+    var echoCancel = true {
         didSet {
             if echoCancel, let d = echoInput { voiceMic.prepare(input: d) } else if !echoCancel, !voiceMic.inUse { voiceMic.release() }
         }
@@ -364,6 +367,11 @@ final class SpeakEngine {
         // A unit left over (toggled off mid-press, a virtual mic) would starve the plain mic; one the
         // room is using stays (the talk key is then on another mic).
         if !voiceMic.inUse { voiceMic.release() }
+        // A fresh engine each press: one kept from the last press still reports the input's old
+        // format after the device changed it (AirPods drop to call quality when their mic opens),
+        // and installing a tap in that format raises an exception that ends the app.
+        if mic.isRunning { mic.inputNode.removeTap(onBus: 0); mic.stop() }
+        mic = AVAudioEngine()
         let inputNode = mic.inputNode
         AudioDevices.pinInput(mic, to: inputDevice?())
         // Pinning can leave the client format at BlackHole's rate/channels. A tap must use
@@ -403,13 +411,15 @@ final class SpeakEngine {
         pressSamples.append(contentsOf: UnsafeBufferPointer(start: p[0], count: Int(c.frameLength)))
     }
 
-    /// The press as a WAV file in memory (44-byte RIFF header + little-endian samples).
-    private func takePressWAV() -> Data? {
+    /// The press as a WAV file in memory (44-byte RIFF header + little-endian samples), and whether
+    /// anyone spoke in it (`PressSpeech`).
+    private func takePressWAV() -> (wav: Data?, spoken: Bool) {
         let samples = micQueue.sync { () -> [Int16] in
             defer { pressSamples = [] }
             return pressSamples
         }
-        guard samples.count >= 16_000 / 4 else { return nil }
+        let spoken = PressSpeech.spoken(samples)
+        guard samples.count >= 16_000 / 4 else { return (nil, spoken) }
         var d = Data()
         func u32(_ v: UInt32) { withUnsafeBytes(of: v.littleEndian) { d.append(contentsOf: $0) } }
         func u16(_ v: UInt16) { withUnsafeBytes(of: v.littleEndian) { d.append(contentsOf: $0) } }
@@ -420,7 +430,7 @@ final class SpeakEngine {
         samples.withUnsafeBufferPointer { buf in
             for s in buf { withUnsafeBytes(of: s.littleEndian) { d.append(contentsOf: $0) } }
         }
-        return d
+        return (d, spoken)
     }
 
     private nonisolated func recordMic(_ buffer: AVAudioPCMBuffer) {
@@ -449,8 +459,18 @@ final class SpeakEngine {
         Task { await u.input.finish() }
         let released = releasedAt ?? Date()
         releasedAt = nil
-        let wav = takePressWAV()
+        let (wav, spoken) = takePressWAV()
         probe?.released = released
+        // A press nobody spoke in: Ming hears 嗯 in the room's hush and the meeting would hear "Hmm."
+        if wav != nil, !spoken, probe == nil {
+            debugLog("speak: nothing said in the press, nothing sent")
+            Task { _ = await u.text.value }
+            finals = []
+            volatile = ""
+            phase = .idle
+            onLive?(.idle, "", "")
+            return
+        }
         probe?.pressWAV = wav
         let from = settings.speakFromLang.code
         let to = targetCode
@@ -470,12 +490,15 @@ final class SpeakEngine {
             volatile = ""
             if !text.isEmpty { onLive?(.translating, text, "") }
             let heard = await ming.value
+            debugLog("speak: on-device heard \(text.count) chars, Ming \(heard.map { "\($0.original.count)" } ?? "-") chars")
             if let heard { text = heard.original }
             // Ming answers recognition and translation together: its whole call counts as `recognize`.
             let textAt = Date()
             probe?.text = text
             probe?.textAt = textAt
-            guard !text.isEmpty else {
+            // A lone 嗯 or "um" is the room's hush or an echo's tail, not a sentence to interpret.
+            guard !text.isEmpty, !PressSpeech.filler(text) else {
+                if !text.isEmpty { debugLog("speak: only a filler heard, nothing sent") }
                 phase = .idle
                 onLive?(.idle, "", "")
                 probe?.finish()
@@ -760,3 +783,38 @@ final class SpeechWriter: NSObject, AVSpeechSynthesizerDelegate, @unchecked Send
     func speechSynthesizer(_ s: AVSpeechSynthesizer, didFinish u: AVSpeechUtterance) { end() }
     func speechSynthesizer(_ s: AVSpeechSynthesizer, didCancel u: AVSpeechUtterance) { end() }
 }
+
+/// Whether anyone spoke during a press of the talk key, from its 16 kHz samples: 0.3 s of 30 ms
+/// frames over three times the press's own quiet (its quietest tenth), between -44 and -36 dBFS. A silent
+/// press in a quiet room came back from Ming as "嗯。" and went out as "Hmm.".
+enum PressSpeech {
+    static let frame = 480
+    static let needed = 0.3
+
+    /// Nothing but fillers (嗯, 啊, um, hmm…), whatever the punctuation.
+    static func filler(_ text: String) -> Bool {
+        let words = text.lowercased().split { !$0.isLetter }.map(String.init)
+        guard !words.isEmpty else { return true }
+        return words.allSatisfy { w in fillers.contains(w) || (w.count > 1 && Set(w).count == 1 && fillers.contains(String(w.first!))) }
+    }
+    static let fillers: Set<String> = ["嗯", "啊", "呃", "哦", "唔", "额", "噢", "哎", "um", "uh", "hmm", "hm", "mm", "mhm", "ah", "oh", "er", "えー", "あの", "음", "어"]
+
+    static func spoken(_ samples: [Int16]) -> Bool {
+        guard samples.count >= frame else { return false }
+        var levels: [Float] = []
+        var i = 0
+        while i + frame <= samples.count {
+            var sum: Float = 0
+            for k in i..<(i + frame) { let v = Float(samples[k]) / 32768; sum += v * v }
+            levels.append((sum / Float(frame)).squareRoot())
+            i += frame
+        }
+        // A press can be speech from end to end: its quietest tenth is the room only when it has
+        // pauses, so the line stops at -36 dBFS, which a voice into the mic clears anyway.
+        let floor = levels.sorted()[levels.count / 10]
+        let line = min(0.016, max(0.0063, floor * 3))
+        let voiced = Double(levels.filter { $0 >= line }.count) * Double(frame) / 16_000
+        return voiced >= needed
+    }
+}
+

@@ -8,6 +8,8 @@ import AppKit
 /// - Rest the pointer on it for 0.6 s to edit: outline + corner grip.
 /// - Drag anywhere to move (snaps to the screen's centre line).
 /// - Drag the bottom-right grip to scale; the font scales with the width.
+/// - The bottom-left button turns the microphone on or off (打开麦克风, the panel's switch): the
+///   bar has no notes window beside it. Only while editing, so the bar stays click-through.
 /// - Double-click to return to the default spot.
 /// - Position, width and size are remembered per display.
 @MainActor
@@ -27,6 +29,13 @@ final class OverlayController {
     var mode: () -> (auto: Bool, hideAfter: Double) = { (true, 4) }
     /// Called when the bar tucks away after a quiet spell.
     var onCollapsed: (() -> Void)?
+    /// The microphone button while editing.
+    var onMic: (() -> Void)?
+    func setMic(_ on: Bool) {
+        guard view.micOn != on else { return }
+        view.micOn = on
+        view.needsDisplay = true
+    }
     private(set) var expanded = true
     private(set) var manualHidden = false
     private(set) var dimmed = false
@@ -467,6 +476,7 @@ final class OverlayView: NSView {
     /// Translation lines the bar is sized for (1 or 2), so a short line leaves no gap.
     var transLines = 1
     var dragMode: Bool?
+    var micOn = false
 
     private let orange = NSColor(srgbRed: 1.0, green: 0.71, blue: 0.62, alpha: 1)
     private let accent = NSColor(srgbRed: 0.91, green: 0.33, blue: 0.17, alpha: 1)
@@ -498,6 +508,12 @@ final class OverlayView: NSView {
     private var gripRect: NSRect {
         let s: CGFloat = 26
         return NSRect(x: barRect.maxX - s + 6, y: barRect.minY - 6, width: s, height: s)
+    }
+
+    /// 打开麦克风 while editing: the grip's twin in the bottom-left corner.
+    private var micRect: NSRect {
+        let s: CGFloat = 26
+        return NSRect(x: barRect.minX - 6, y: barRect.minY - 6, width: s + 8, height: s)
     }
 
     // MARK: Drawing
@@ -603,6 +619,17 @@ final class OverlayView: NSView {
             p.move(to: NSPoint(x: g.midX + 1, y: g.minY + 7)); p.line(to: NSPoint(x: g.maxX - 7, y: g.midY - 1))
             NSColor(calibratedWhite: 0.08, alpha: 1).setStroke()
             p.stroke()
+
+            let m = micRect
+            (micOn ? NSColor(srgbRed: 0.99, green: 0.93, blue: 0.906, alpha: 1) : NSColor(calibratedWhite: 0.94, alpha: 1)).setFill()
+            NSBezierPath(roundedRect: m, xRadius: 8, yRadius: 8).fill()
+            let config = NSImage.SymbolConfiguration(pointSize: 13, weight: .semibold)
+                .applying(.init(paletteColors: [micOn ? accent : NSColor(calibratedWhite: 0.08, alpha: 1)]))
+            if let icon = NSImage(systemSymbolName: micOn ? "mic.fill" : "mic", accessibilityDescription: micOn ? L("关闭麦克风") : L("打开麦克风"))?
+                .withSymbolConfiguration(config) {
+                icon.draw(in: NSRect(x: m.midX - icon.size.width / 2, y: m.midY - icon.size.height / 2,
+                                     width: icon.size.width, height: icon.size.height))
+            }
         }
     }
 
@@ -639,6 +666,10 @@ final class OverlayView: NSView {
             return
         }
         let p = convert(event.locationInWindow, from: nil)
+        if hover, micRect.insetBy(dx: -4, dy: -4).contains(p) {
+            controller?.onMic?()
+            return
+        }
         dragMode = gripRect.insetBy(dx: -6, dy: -6).contains(p)
         controller?.beginDrag()
         (dragMode == true ? NSCursor.crosshair : NSCursor.closedHand).push()
@@ -660,6 +691,7 @@ final class OverlayView: NSView {
         if hover {
             addCursorRect(barRect, cursor: .openHand)
             addCursorRect(gripRect, cursor: .crosshair)
+            addCursorRect(micRect, cursor: .pointingHand)
         }
     }
 }

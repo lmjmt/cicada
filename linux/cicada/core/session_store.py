@@ -8,7 +8,7 @@ import shutil
 import threading
 from datetime import datetime, timezone
 
-from . import speakers, strings
+from . import aac, speakers, strings
 from .models import Session, now
 from .support import Log, Paths, clock
 
@@ -42,6 +42,28 @@ class SessionStore:
 
     def _folder(self, sid: str) -> str:
         return os.path.join(Paths.sessions(), sid)
+
+    def audio_path(self, sid: str) -> str:
+        """What was heard, as on the Mac: system.m4a in the meeting's folder (system.aac while it is
+        being recorded, see aac.py)."""
+        return os.path.join(self._folder(sid), "system.m4a")
+
+    def unfinished_audio(self) -> list:
+        """Meetings whose recording is still the partial file (the app quit mid-meeting, or before
+        rewrapping it): their ids, to finish at launch as the Mac's load() does."""
+        with self._gate:
+            out = []
+            for s in self._sessions.values():
+                if s.id != self.live and os.path.isfile(aac.partial(self.audio_path(s.id))):
+                    out.append(s.id)
+            return out
+
+    def set_has_audio(self, sid: str) -> None:
+        with self._gate:
+            s = self._sessions.get(sid)
+            if s is None or s.hasAudio:
+                return
+        self._mutate(sid, lambda s: setattr(s, "hasAudio", True))
 
     def _load(self) -> None:
         root = Paths.sessions()
@@ -224,6 +246,9 @@ class SessionStore:
                 return
             s.endedAt = max(ended_at, s.startedAt) if ended_at is not None else now()
             empty = not s.lines
+            # The recording is rewrapped into system.m4a afterwards: either file means it has one.
+            path = self.audio_path(sid)
+            s.hasAudio = os.path.isfile(path) or (os.path.isfile(aac.partial(path)) and os.path.getsize(aac.partial(path)) > 0)
         if empty:
             self.delete(sid)
         else:

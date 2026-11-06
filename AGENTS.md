@@ -6,7 +6,7 @@ Cicada (知了, formerly Live Subs) turns what a computer plays into live transl
 
 - Mac surfaces: menu bar panel, live notes window (default) or subtitle bar while listening, main window (meeting records), settings, four-step onboarding (system audio, sample meeting, Ling key, speaking if wanted). A request that fits none of them gets pushed back before any UI is added.
 - Nothing the user does needs the Terminal.
-- Listening: Core Audio process tap → on-device language detection and `SpeechAnalyzer` → translation. Voices: a bundled Core ML voiceprint model (`SpeakerID.swift`), compiled on first use. Speaking: hold right ⌥ or a shortcut → mic → Ming (with a Ling key) or on-device + translation → voice → BlackHole 2ch virtual mic.
+- Listening: Core Audio process tap → on-device language detection and `SpeechAnalyzer` → translation. Voices: a bundled Core ML voiceprint model (`SpeakerID.swift`). Speaking: hold right ⌥ → mic → Ming (with a Ling key) or on-device + translation → voice → BlackHole 2ch virtual mic.
 
 ## Hard rules
 
@@ -29,9 +29,9 @@ Cicada (知了, formerly Live Subs) turns what a computer plays into live transl
 
 ## Layout
 
-- `Sources/Cicada`: the app, one concern per file. Engines are UI-free (`ListenEngine`, `SpeakEngine`, `SpeakTest`, `Notes`, `Translator`, `Ling`, `VirtualMic`, `SessionStore`, `Updates`…); `AppModel` wires them and holds the debug commands. Settings keys: `AppSettings` in `Settings.swift`.
+- `Sources/Cicada`: the app, one concern per file. Engines are UI-free (`ListenEngine`, `SpeakEngine`, `Notes`, `Translator`, `Ling`, `VirtualMic`, `SessionStore`…); `AppModel` wires them and holds the debug commands. Settings keys: `AppSettings` in `Settings.swift`.
 - `Sources/CicadaIcon`: renders the icon set. `site/`: the website, built by `scripts/site.py`.
-- The site is Chinese at `/`, English / Japanese / Korean under `/en/` `/ja/` `/ko/`; every `{{t.key}}` comes from `site/i18n/<lang>.json`. `start.html` is the setup page (`download.html` the downloads); its `img/start/` screenshots come from the app in each language. `tools/`: test helpers. `Tests/CicadaTests`: unit tests for the pure parts.
+- The site is Chinese at `/`, English / Japanese / Korean under `/en/` `/ja/` `/ko/`; every `{{t.key}}` comes from `site/i18n/<lang>.json`. `start.html` is the setup page (`download.html` the downloads); its `img/start/` shots come from the app per language. `tools/`: test helpers. `Tests/CicadaTests`: unit tests for the pure parts.
 
 ## Commands
 
@@ -40,7 +40,7 @@ scripts/test.sh                        # AGENTS.md check + unit tests
 scripts/build.sh && open build/Cicada.app   # dev build: own bundle id, settings, log
 RELEASE=1 scripts/build.sh             # release build
 scripts/package.sh                     # DMG + zip + checksums
-scripts/release.sh <x.y.z>             # VERSION, CHANGELOG, tag; CI drafts what changed; publish-release.sh
+scripts/release.sh <x.y.z>             # whole flow (verify, draft, retest, publish): .claude/skills/release
 scripts/deploy-site.sh                 # build and deploy the site (cicada.indaloop.app)
 ```
 
@@ -48,7 +48,7 @@ scripts/deploy-site.sh                 # build and deploy the site (cicada.indal
 
 - Run the app and check the behaviour, not just the build; check the English UI too.
 - Drive the dev build with `tools/lsctl` (commands and testing tips in `tools/README.md`; the source of truth is `AppModel.debugCommand`). Use `afplay Resources/sample/sample.m4a` or `say -o` clips as input and read `/tmp/livesubs-dev-debug.log`.
-- A real voice, the BlackHole install, Input Monitoring and a Mac without permissions need a person.
+- Real sound (room mic, 同声传译): `.claude/skills/audio-test`. A real voice, the BlackHole install, Input Monitoring and a Mac without permissions need a person.
 
 ## Conventions
 
