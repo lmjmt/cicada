@@ -29,7 +29,7 @@ enum MicUsers {
     /// listed only while they read a microphone, or the list would always show them.
     static let meetingApps: Set<String> = [
         "us.zoom.xos", "com.tencent.meeting", "com.microsoft.teams2", "com.microsoft.teams",
-        "com.electron.lark", "com.bytedance.lark", "com.alibaba.DingTalkMac", "Cisco-Systems.Spark",
+        "com.electron.lark", "com.bytedance.lark", "com.larksuite.larkApp", "com.alibaba.DingTalkMac", "Cisco-Systems.Spark",
     ]
 
     /// One audio-reading process: its bundle id and the input devices it has open.

@@ -52,6 +52,19 @@ final class SystemAudioTap {
         return device
     }
 
+    static func defaultOutputSampleRate() -> Float64 {
+        guard let device = defaultOutputDevice() else { return 48_000 }
+        var rate: Float64 = 48_000
+        var size = UInt32(MemoryLayout<Float64>.size)
+        var addr = AudioObjectPropertyAddress(
+            mSelector: kAudioDevicePropertyNominalSampleRate,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        let status = AudioObjectGetPropertyData(device, &addr, 0, nil, &size, &rate)
+        return (status == noErr && rate > 0) ? rate : 48_000
+    }
+
     static func ownProcessObject() -> AudioObjectID? {
         var pid = getpid()
         var obj = AudioObjectID(kAudioObjectUnknown)
@@ -164,8 +177,9 @@ final class SystemAudioTap {
                                       &device, UInt32(MemoryLayout<AudioObjectID>.size))
         guard status == noErr else { throw fail(Int(status), L("无法连接音频聚合设备（\(status)）")) }
 
+        let sampleRate = Self.defaultOutputSampleRate()
         var asbd = AudioStreamBasicDescription(
-            mSampleRate: 48_000,
+            mSampleRate: sampleRate,
             mFormatID: kAudioFormatLinearPCM,
             mFormatFlags: kAudioFormatFlagIsFloat | kAudioFormatFlagIsPacked | kAudioFormatFlagIsNonInterleaved,
             mBytesPerPacket: 4,
@@ -177,7 +191,7 @@ final class SystemAudioTap {
         )
         guard let clientFormat = AVAudioFormat(streamDescription: &asbd) else { throw fail(-3, L("无法创建音频格式")) }
         self.clientFormat = clientFormat
-        self.monoFormat = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: 48_000, channels: 1, interleaved: false)
+        self.monoFormat = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: sampleRate, channels: 1, interleaved: false)
         // Pre-allocate so the real-time callback normally doesn't allocate.
         self.renderBuffer = AVAudioPCMBuffer(pcmFormat: clientFormat, frameCapacity: 4096)
 
